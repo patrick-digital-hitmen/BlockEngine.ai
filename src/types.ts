@@ -7,6 +7,7 @@ export interface Project {
   builderType: BuilderType;
   createdAt: any;
   ownerId: string;
+  replacementContent?: string;
 }
 
 export interface Block {
@@ -28,7 +29,7 @@ export interface Page {
   id: string;
   projectId: string;
   title: string;
-  sourceHtml: string;
+  replacementContent?: string;
   createdAt: any;
 }
 

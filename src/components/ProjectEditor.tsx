@@ -10,6 +10,60 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { ThreadEditor } from './ThreadEditor';
 
+function BlockNameInput({ db, projectId, block, index }: { db: any, projectId: string, block: Block, index: number }) {
+  const [name, setName] = React.useState(block.name || `Section ${index + 1}`);
+
+  React.useEffect(() => {
+    setName(block.name || `Section ${index + 1}`);
+  }, [block.name, index]);
+
+  return (
+    <input 
+      type="text"
+      value={name}
+      onChange={(e) => setName(e.target.value)}
+      onBlur={(e) => updateDoc(doc(db, `projects/${projectId}/blocks`, block.id), { name: e.target.value })}
+      className="font-bold text-slate-800 text-sm bg-transparent border border-transparent focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-100 px-1.5 py-0.5 -ml-1.5 rounded outline-none w-48 transition-all"
+    />
+  );
+}
+
+const extractBasicLayout = (code: string, builderType: string): string => {
+  try {
+    if (builderType === 'wp-bakery') {
+      const colRegex = /\[(?:vc_column|vc_column_inner)\b([^\]]*)\]/g;
+      const colMatches = [...code.matchAll(colRegex)];
+      let colsStr = '';
+      if (colMatches.length > 0) {
+        let widths = colMatches.map(m => {
+          const w = m[1].match(/width=["']([^"']+)["']/);
+          return w ? w[1] : '1/1';
+        });
+        colsStr = `${widths.length} cols (${widths.join(' | ')})`;
+      }
+
+      const rowMatch = code.match(/\[(?:vc_row|vc_section)\b([^\]]*)\]/);
+      let extras = [];
+      if (rowMatch) {
+         if (rowMatch[1].includes('video_bg="yes"')) extras.push('bg: video');
+         else if (rowMatch[1].match(/bg_image=["']/)) extras.push('bg: img');
+         else if (rowMatch[1].match(/bg_color=["']/)) extras.push('bg: color');
+         if (rowMatch[1].match(/css=["'][^"']*padding[^"']*["']/)) extras.push('pad: custom');
+      }
+
+      if (colsStr || extras.length > 0) {
+        return [colsStr, ...extras].filter(Boolean).join(' • ');
+      }
+    } else if (builderType === 'gutenberg') {
+      const coreColumns = [...code.matchAll(/<!-- wp:column\b/g)];
+      if (coreColumns.length > 0) {
+        return `${coreColumns.length} cols`;
+      }
+    }
+  } catch(e) {}
+  return '';
+};
+
 interface ProjectEditorProps {
   project: Project;
   onBack: () => void;
@@ -123,7 +177,6 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
           ...prev,
           name: prev.name || data.name || '', 
           type: data.type, 
-          layoutDescription: data.layout || '', 
           textPreview: data.textPreview || '',
           cleanHtml: data.cleanHtml || ''
         }));
@@ -141,7 +194,6 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
         await updateDoc(doc(db, `projects/${project.id}/blocks`, block.id), {
           name: typeof data.name === 'string' ? data.name : (block.name || 'Component'),
           type: typeof data.type === 'string' ? data.type : 'Content/Text Section',
-          layoutDescription: typeof data.layout === 'string' ? data.layout : JSON.stringify(data.layout || ''),
           textPreview: typeof data.textPreview === 'string' ? data.textPreview : JSON.stringify(data.textPreview || ''),
           cleanHtml: typeof data.cleanHtml === 'string' ? data.cleanHtml : ''
         });
@@ -172,7 +224,7 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
           name: importMode === 'page' ? `${newBlock.name || 'Component'} ${i + 1}` : newBlock.name,
           originalCode: code,
           type: newBlock.type,
-          layoutDescription: '',
+          layoutDescription: importMode === 'page' ? extractBasicLayout(code, project.builderType) : (newBlock.layoutDescription || extractBasicLayout(code, project.builderType)),
           textPreview: '',
           cleanHtml: '',
           projectId: project.id,
@@ -491,12 +543,7 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
                       {index + 1}
                     </div>
                     <div>
-                      <input 
-                        type="text"
-                        defaultValue={block.name || `Section ${index + 1}`}
-                        onBlur={(e) => updateDoc(doc(db, `projects/${project.id}/blocks`, block.id), { name: e.target.value })}
-                        className="font-bold text-slate-800 text-sm bg-transparent border border-transparent focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-100 px-1.5 py-0.5 -ml-1.5 rounded outline-none w-48 transition-all"
-                      />
+                      <BlockNameInput db={db} projectId={project.id} block={block} index={index} />
                       <div className="flex items-center gap-2 mt-0.5">
                         {block.layoutDescription && block.layoutDescription !== "Unknown Layout" && block.layoutDescription !== "Auto-detect failed" ? (
                            <span className="text-[9px] font-bold text-indigo-500 uppercase tracking-[0.1em] truncate max-w-[300px]">{block.layoutDescription}</span>

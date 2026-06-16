@@ -2,8 +2,15 @@ import React, { useState, useEffect } from 'react';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { collection, query, orderBy, onSnapshot, addDoc, doc, updateDoc, writeBatch, deleteDoc } from 'firebase/firestore';
 import { Project, Block, Page, PageBlock } from '../types';
-import { ArrowLeft, Play, Download, Loader2, Plus, GripVertical, CheckCircle2 } from 'lucide-react';
+import { ArrowLeft, Play, Download, Loader2, Plus, GripVertical, CheckCircle2, Trash2, Wand2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+
+const splitHtmlByH2 = (html: string) => {
+  if (!html) return [];
+  const marked = html.replace(/(<h2[\s>])/gi, '---H2_SPLIT---$1');
+  const parts = marked.split('---H2_SPLIT---');
+  return parts.filter(p => p.trim().length > 0);
+};
 
 interface ThreadEditorProps {
   project: Project;
@@ -53,6 +60,58 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
     }
   };
 
+  const handleAutoMap = async () => {
+    try {
+      setIsGeneratingAll(true); // just use for loading state
+      const sections = splitHtmlByH2(page.replacementContent || '');
+      const batch = writeBatch(db);
+      
+      // Clear existing pageBlocks
+      pageBlocks.forEach(b => {
+         batch.delete(doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, b.id));
+      });
+
+      sections.forEach((sectionHtml, i) => {
+         const libBlock = i < libraryBlocks.length ? libraryBlocks[i] : null;
+         const newRef = doc(collection(db, `projects/${project.id}/pages/${page.id}/pageBlocks`));
+         batch.set(newRef, {
+          pageId: page.id,
+          projectId: project.id,
+          libraryBlockId: libBlock?.id || null,
+          originalCode: libBlock?.originalCode || '',
+          mappedHtmlSnippet: sectionHtml, // Pass the parsed HTML block
+          generatedCode: '',
+          status: 'pending',
+          order: i,
+          isVerbatim: libBlock?.isVerbatim || false,
+          name: libBlock?.name || `Section ${i + 1}`,
+          type: libBlock?.type || 'Content/Text Section'
+         });
+      });
+      
+      await batch.commit();
+      setIsGeneratingAll(false);
+    } catch (e) {
+      console.error("Auto Map Error: ", e);
+      setIsGeneratingAll(false);
+    }
+  };
+
+  const handleChangeLibraryBlock = async (pBlockId: string, libBlockId: string) => {
+    const libBlock = libraryBlocks.find(b => b.id === libBlockId);
+    if (!libBlock) return;
+    
+    await updateDoc(doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, pBlockId), {
+      libraryBlockId: libBlock.id,
+      originalCode: libBlock.originalCode,
+      isVerbatim: libBlock.isVerbatim || false,
+      name: libBlock.name,
+      type: libBlock.type,
+      status: 'pending',
+      generatedCode: ''
+    });
+  };
+
   const handleGenerate = async (pBlock: PageBlock) => {
     try {
       const blockRef = doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, pBlock.id);
@@ -69,7 +128,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
         body: JSON.stringify({
           blockCode: pBlock.originalCode,
           writingInstructions: project.writingInstructions,
-          replacementContent: page.replacementContent || '', 
+          replacementContent: pBlock.mappedHtmlSnippet || page.replacementContent || '', 
           builderType: project.builderType,
           mode: 'rewrite', // Defaults to rewrite in threads
           engine: engine
@@ -86,6 +145,16 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
       await updateDoc(blockRef, { status: 'failed' });
       alert("Generation failed: " + error.message);
     }
+  };
+
+  const handleGenerateAll = async () => {
+    setIsGeneratingAll(true);
+    for (const block of pageBlocks) {
+      if (block.status !== 'completed' || block.isVerbatim) {
+        await handleGenerate(block);
+      }
+    }
+    setIsGeneratingAll(false);
   };
 
   const handleDownload = () => {
@@ -129,6 +198,15 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
           </select>
 
           <button
+            onClick={handleGenerateAll}
+            disabled={pageBlocks.length === 0 || isGeneratingAll}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2 px-4 rounded-xl flex items-center gap-2 transition-all shadow-sleek disabled:opacity-50"
+          >
+            {isGeneratingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 fill-current" />}
+            Generate All Content
+          </button>
+
+          <button
             onClick={handleDownload}
             disabled={pageBlocks.length === 0}
             className="bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 font-semibold py-2 px-4 rounded-xl flex items-center gap-2 transition-all shadow-sleek"
@@ -157,13 +235,22 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
           <div className="max-w-3xl mx-auto space-y-6">
             
             <div className="flex items-center justify-between mb-8">
-               <h3 className="text-xl font-bold text-slate-800 tracking-tight">Assigned Architect Sections</h3>
-               <button 
-                 onClick={() => setIsAddingSection(true)}
-                 className="flex items-center gap-2 bg-indigo-50 text-indigo-700 px-4 py-2 border border-indigo-100 font-bold text-sm rounded-xl hover:bg-indigo-100 transition-colors"
-                >
-                 <Plus className="w-4 h-4" /> Add Section To Map
-               </button>
+               <h3 className="text-xl font-bold text-slate-800 tracking-tight">Mapped Sections</h3>
+               <div className="flex gap-2">
+                 <button 
+                    onClick={handleAutoMap}
+                    disabled={isGeneratingAll}
+                    className="flex items-center gap-2 bg-purple-50 text-purple-700 px-4 py-2 border border-purple-100 font-bold text-sm rounded-xl hover:bg-purple-100 transition-colors disabled:opacity-50"
+                  >
+                    {isGeneratingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />} Auto-Map Content
+                  </button>
+                 <button 
+                   onClick={() => setIsAddingSection(true)}
+                   className="flex items-center gap-2 bg-indigo-50 text-indigo-700 px-4 py-2 border border-indigo-100 font-bold text-sm rounded-xl hover:bg-indigo-100 transition-colors"
+                  >
+                   <Plus className="w-4 h-4" /> Add Section
+                 </button>
+               </div>
             </div>
 
             {isAddingSection && (
@@ -203,9 +290,20 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                           {index + 1}
                         </div>
                         <div>
-                          <h4 className="font-bold text-slate-800 text-sm">{block.name}</h4>
+                          <div className="flex items-center gap-2">
+                             <select 
+                               className="font-bold text-slate-800 text-sm bg-transparent border border-transparent focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-100 rounded outline-none max-w-[200px] truncate"
+                               value={block.libraryBlockId || ''}
+                               onChange={e => handleChangeLibraryBlock(block.id, e.target.value)}
+                             >
+                               <option value="" disabled>-- Select Component --</option>
+                               {libraryBlocks.map(b => (
+                                 <option key={b.id} value={b.id}>{b.name || b.type}</option>
+                               ))}
+                             </select>
+                          </div>
                           <div className="flex items-center gap-2 mt-0.5">
-                            <span className="text-[9px] font-bold text-indigo-400 uppercase tracking-[0.2em]">{block.type}</span>
+                            <span className="text-[9px] font-bold text-indigo-400 uppercase tracking-[0.2em]">{block.type || 'Unmapped'}</span>
                             {block.isVerbatim && <span className="text-[9px] font-bold text-emerald-500 bg-emerald-50 px-1 rounded uppercase tracking-[0.1em]">Verbatim</span>}
                             {block.status === 'completed' && <span className="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-1 rounded uppercase tracking-[0.1em]">Generated</span>}
                           </div>
@@ -227,8 +325,16 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                       </div>
                     </div>
                     
+                    {block.mappedHtmlSnippet && (
+                      <div className="px-5 py-3 bg-slate-50 border-b border-slate-100">
+                        <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Mapped HTML Content</div>
+                        <div className="font-mono text-[10px] text-slate-600 max-h-32 overflow-y-auto whitespace-pre-wrap p-3 bg-white border border-slate-200 rounded text-clip">{block.mappedHtmlSnippet.slice(0, 300)}{block.mappedHtmlSnippet.length > 300 ? '...' : ''}</div>
+                      </div>
+                    )}
+                    
                     {block.status === 'completed' && block.generatedCode && (
-                       <div className="p-4 bg-white font-mono text-[10px] text-slate-600 whitespace-pre-wrap max-h-48 overflow-y-auto">
+                       <div className="p-4 bg-indigo-50/30 border-t border-indigo-50 font-mono text-[10px] text-slate-700 whitespace-pre-wrap max-h-48 overflow-y-auto relative">
+                         <div className="absolute top-2 right-2 text-[9px] font-bold text-indigo-400 uppercase tracking-widest bg-white px-2 py-1 rounded shadow-sm">Generated HTML</div>
                          {block.generatedCode}
                        </div>
                     )}
