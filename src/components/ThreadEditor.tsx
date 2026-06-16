@@ -3,7 +3,7 @@ import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { collection, query, orderBy, onSnapshot, addDoc, doc, updateDoc, writeBatch, deleteDoc } from 'firebase/firestore';
 import { Project, Block, Page, PageBlock } from '../types';
 import { ArrowLeft, Play, Download, Loader2, Plus, GripVertical, CheckCircle2, Trash2, Wand2 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { motion, AnimatePresence, Reorder } from 'motion/react';
 
 const splitHtmlByH2 = (html: string) => {
   if (!html) return [];
@@ -25,6 +25,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
   const [selectedLibraryId, setSelectedLibraryId] = useState('');
   const [isGeneratingAll, setIsGeneratingAll] = useState(false);
   const [engine, setEngine] = useState<'gemini' | 'gemini-pro' | 'groq'>('gemini');
+  const [model, setModel] = useState<string>('');
 
   useEffect(() => {
     const q = query(collection(db, `projects/${project.id}/pages/${page.id}/pageBlocks`), orderBy('order', 'asc'));
@@ -71,21 +72,29 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
          batch.delete(doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, b.id));
       });
 
-      sections.forEach((sectionHtml, i) => {
-         const libBlock = i < libraryBlocks.length ? libraryBlocks[i] : null;
+      let sectionIndex = 0;
+      libraryBlocks.forEach((libBlock, i) => {
          const newRef = doc(collection(db, `projects/${project.id}/pages/${page.id}/pageBlocks`));
+         
+         let mappedSnippet = '';
+         // Only map a section snippet if the block is NOT verbatim
+         if (!libBlock.isVerbatim && sectionIndex < sections.length) {
+            mappedSnippet = sections[sectionIndex];
+            sectionIndex++;
+         }
+
          batch.set(newRef, {
           pageId: page.id,
           projectId: project.id,
-          libraryBlockId: libBlock?.id || null,
-          originalCode: libBlock?.originalCode || '',
-          mappedHtmlSnippet: sectionHtml, // Pass the parsed HTML block
+          libraryBlockId: libBlock.id || null,
+          originalCode: libBlock.originalCode || '',
+          mappedHtmlSnippet: mappedSnippet, 
           generatedCode: '',
           status: 'pending',
           order: i,
-          isVerbatim: libBlock?.isVerbatim || false,
-          name: libBlock?.name || `Section ${i + 1}`,
-          type: libBlock?.type || 'Content/Text Section'
+          isVerbatim: libBlock.isVerbatim || false,
+          name: libBlock.name || `Section ${i + 1}`,
+          type: libBlock.type || 'Content/Text Section'
          });
       });
       
@@ -131,7 +140,8 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
           replacementContent: pBlock.mappedHtmlSnippet || page.replacementContent || '', 
           builderType: project.builderType,
           mode: 'rewrite', // Defaults to rewrite in threads
-          engine: engine
+          engine: engine,
+          model: model
         })
       });
 
@@ -150,11 +160,32 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
   const handleGenerateAll = async () => {
     setIsGeneratingAll(true);
     for (const block of pageBlocks) {
-      if (block.status !== 'completed' || block.isVerbatim) {
+      if (block.isVerbatim) {
         await handleGenerate(block);
+        continue;
       }
+      if (block.status === 'completed') continue; 
+      
+      await handleGenerate(block);
+      // Small delay for rate limits
+      await new Promise(r => setTimeout(r, 600));
     }
     setIsGeneratingAll(false);
+  };
+
+  const handleReorder = async (newOrder: PageBlock[]) => {
+    setPageBlocks(newOrder);
+    try {
+      const batch = writeBatch(db);
+      newOrder.forEach((block, index) => {
+        batch.update(doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, block.id), {
+          order: index
+        });
+      });
+      await batch.commit();
+    } catch (e) {
+      console.error("Reorder failed:", e);
+    }
   };
 
   const handleDownload = () => {
@@ -190,12 +221,34 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
           <select 
             className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm font-medium text-slate-600 outline-none hover:border-indigo-300 transition-colors"
             value={engine}
-            onChange={(e) => setEngine(e.target.value as 'gemini' | 'gemini-pro' | 'groq')}
+            onChange={(e) => {
+              const val = e.target.value as 'gemini' | 'gemini-pro' | 'groq';
+              setEngine(val);
+              if (val === 'groq' && !model) {
+                setModel('llama-3.3-70b-versatile');
+              } else if (val !== 'groq') {
+                setModel('');
+              }
+            }}
           >
-            <option value="gemini">Gemini 3.5 Flash</option>
+            <option value="gemini">Gemini 1.5 Flash</option>
             <option value="gemini-pro">Gemini 1.5 Pro</option>
-            <option value="groq">Groq Llama-3</option>
+            <option value="groq">Groq</option>
           </select>
+
+          {engine === 'groq' && (
+            <select 
+              className="bg-slate-50 border border-slate-200 rounded-xl px-4 py-2 text-sm font-medium text-slate-600 outline-none hover:border-indigo-300 transition-colors"
+              value={model}
+              onChange={(e) => setModel(e.target.value)}
+            >
+              <option value="llama-3.3-70b-versatile">Llama 3.3 70B (Versatile)</option>
+              <option value="llama-3.1-70b-versatile">Llama 3.1 70B</option>
+              <option value="llama-3.1-8b-instant">Llama 3.1 8B (Instant - High RPM)</option>
+              <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+              <option value="gemma2-9b-it">Gemma 2 9B</option>
+            </select>
+          )}
 
           <button
             onClick={handleGenerateAll}
@@ -273,12 +326,12 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
               </motion.div>
             )}
 
-            <div className="space-y-4">
-              <AnimatePresence>
+            <Reorder.Group axis="y" values={pageBlocks} onReorder={handleReorder} className="space-y-4">
+              <AnimatePresence mode="popLayout">
                 {pageBlocks.map((block, index) => (
-                  <motion.div
+                  <Reorder.Item
                     key={block.id}
-                    layout
+                    value={block}
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.95 }}
@@ -286,13 +339,16 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                   >
                     <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/30">
                       <div className="flex items-center gap-4">
+                        <div className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-400 p-1">
+                          <GripVertical className="w-4 h-4" />
+                        </div>
                         <div className="w-8 h-8 bg-slate-100 rounded-lg flex items-center justify-center font-bold text-slate-400 text-xs">
                           {index + 1}
                         </div>
                         <div>
                           <div className="flex items-center gap-2">
                              <select 
-                               className="font-bold text-slate-800 text-sm bg-transparent border border-transparent focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-100 rounded outline-none max-w-[200px] truncate"
+                               className="font-bold text-slate-800 text-sm bg-transparent border border-transparent focus:border-indigo-300 focus:bg-white focus:ring-2 focus:ring-indigo-100 rounded outline-none max-w-[200px] truncate cursor-pointer"
                                value={block.libraryBlockId || ''}
                                onChange={e => handleChangeLibraryBlock(block.id, e.target.value)}
                              >
@@ -305,6 +361,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                           <div className="flex items-center gap-2 mt-0.5">
                             <span className="text-[9px] font-bold text-indigo-400 uppercase tracking-[0.2em]">{block.type || 'Unmapped'}</span>
                             {block.isVerbatim && <span className="text-[9px] font-bold text-emerald-500 bg-emerald-50 px-1 rounded uppercase tracking-[0.1em]">Verbatim</span>}
+                            {block.mappedHtmlSnippet && <span className="text-[9px] font-bold text-amber-500 bg-amber-50 px-1 rounded uppercase tracking-[0.1em]">Mapped</span>}
                             {block.status === 'completed' && <span className="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-1 rounded uppercase tracking-[0.1em]">Generated</span>}
                           </div>
                         </div>
@@ -338,10 +395,10 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                          {block.generatedCode}
                        </div>
                     )}
-                  </motion.div>
+                  </Reorder.Item>
                 ))}
               </AnimatePresence>
-            </div>
+            </Reorder.Group>
             
             {pageBlocks.length === 0 && !isAddingSection && (
                <div className="text-center py-24 px-6 border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/50">

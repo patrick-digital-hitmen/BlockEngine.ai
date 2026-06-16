@@ -81,7 +81,9 @@ const decodeWpCode = (code: string) => {
 };
 
 export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
-  const [activeTab, setActiveTab] = useState<'threads' | 'library'>('threads');
+  const [activeTab, setActiveTab] = useState<'threads' | 'library' | 'settings'>('threads');
+  const [engine, setEngine] = useState<'gemini' | 'gemini-pro' | 'groq'>('gemini');
+  const [model, setModel] = useState<string>('');
   const [pages, setPages] = useState<Page[]>([]);
   const [selectedPage, setSelectedPage] = useState<Page | null>(null);
   const [isCreatingPage, setIsCreatingPage] = useState(false);
@@ -96,7 +98,6 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
   const [inputModes, setInputModes] = useState<Record<string, 'code' | 'preview'>>({});
   const [isClassifyingBlock, setIsClassifyingBlock] = useState<Record<string, boolean>>({});
   const [previewMode, setPreviewMode] = useState<'original' | 'rewritten' | 'seo'>('rewritten');
-  const [engine, setEngine] = useState<'gemini' | 'gemini-pro' | 'groq'>('gemini');
 
   useEffect(() => {
     const q = query(collection(db, `projects/${project.id}/blocks`), orderBy('order', 'asc'));
@@ -306,8 +307,8 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
            return;
         }
 
-        const generationModel = mode === 'seo' ? localStorage.getItem('seoModel') || 'gemini-2.5-pro' : localStorage.getItem('generateModel') || 'gemini-3.5-flash';
-        const isGroqModel = generationModel.startsWith('llama') || generationModel.startsWith('mixtral');
+        const generationModel = model || (mode === 'seo' ? localStorage.getItem('seoModel') || 'gemini-1.5-pro' : localStorage.getItem('generateModel') || 'gemini-1.5-flash');
+        const isGroqModel = engine === 'groq' || generationModel.startsWith('llama') || generationModel.startsWith('mixtral');
         
         const response = await fetch('/api/generate', {
           method: 'POST',
@@ -318,7 +319,7 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
             replacementContent: project.replacementContent || '', // Pass replacement content
             builderType: project.builderType,
             mode: mode,
-            engine: isGroqModel ? 'groq' : 'gemini',
+            engine: engine || (isGroqModel ? 'groq' : 'gemini'),
             model: generationModel
           })
         });
@@ -341,10 +342,19 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
     setGenState({ isGenerating: true, currentBlockIndex: 0, totalBlocks: blocks.length });
 
     for (let i = 0; i < blocks.length; i++) {
+        const block = blocks[i];
         setGenState(prev => ({ ...prev, currentBlockIndex: i + 1 }));
-        await handleGenerate(blocks[i], 'rewrite');
+        
+        if (block.isVerbatim) {
+           await handleGenerate(block, 'rewrite');
+           continue; 
+        }
+
+        if (block.content) continue; // Skip completed
+
+        await handleGenerate(block, 'rewrite');
         // Small delay to prevent rate limit issues
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 600));
     }
 
     setGenState(prev => ({ ...prev, isGenerating: false }));
@@ -403,12 +413,86 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
                >
                  Component Library
                </button>
+               <button
+                 onClick={() => setActiveTab('settings')}
+                 className={`px-4 py-1.5 rounded-lg text-sm font-semibold capitalize transition-all ${
+                   activeTab === 'settings' ? 'bg-white text-indigo-600 shadow-sleek' : 'text-slate-500 hover:text-slate-700'
+                 }`}
+               >
+                 Project Settings
+               </button>
           </div>
         </div>
       </div>
 
       {/* Editor Body */}
       <div className="flex-1 overflow-auto p-8 space-y-6">
+        {activeTab === 'settings' && (
+          <div className="max-w-2xl mx-auto">
+            <motion.div 
+              initial={{ opacity: 0, y: 10 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-white rounded-3xl border border-slate-200 shadow-sleek-lg overflow-hidden"
+            >
+              <div className="px-8 py-6 border-b border-slate-100 bg-slate-50/50">
+                <h3 className="text-xl font-bold text-slate-900">Project Strategy & Configuration</h3>
+                <p className="text-sm text-slate-500 mt-1">Configure the global instructions that the AI uses to rewrite blocks across all threads.</p>
+              </div>
+
+              <div className="p-8 space-y-8">
+                <div className="space-y-3">
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">Project Name</label>
+                    <input 
+                        type="text"
+                        className="w-full px-5 py-3 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all font-medium"
+                        value={project.name}
+                        onChange={(e) => updateDoc(doc(db, 'projects', project.id), { name: e.target.value })}
+                    />
+                </div>
+
+                <div className="space-y-3">
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">Global Writing Instructions</label>
+                    <p className="text-[11px] text-slate-400 leading-relaxed italic">These instructions are injected into every rewrite prompt. Define tone, style, specific acronyms to avoid, or mandatory formatting rules.</p>
+                    <textarea 
+                        rows={10}
+                        className="w-full px-5 py-4 border border-slate-200 rounded-2xl focus:ring-4 focus:ring-indigo-500/10 focus:border-indigo-500 outline-none transition-all resize-none font-medium leading-relaxed"
+                        value={project.writingInstructions}
+                        onChange={(e) => updateDoc(doc(db, 'projects', project.id), { writingInstructions: e.target.value })}
+                        placeholder="e.g., Tone: Professional yet conversational. SEO: Include primary keyword 'WordPress services'. Formatting: Use bullet points for features..."
+                    />
+                </div>
+
+                <div className="space-y-3">
+                    <label className="block text-xs font-bold text-slate-400 uppercase tracking-widest">Target Page Builder</label>
+                    <div className="grid grid-cols-3 gap-4">
+                        {(['elementor', 'wp-bakery', 'gutenberg-acf'] as const).map(type => (
+                            <button
+                                key={type}
+                                onClick={() => updateDoc(doc(db, 'projects', project.id), { builderType: type })}
+                                className={`px-4 py-3 rounded-2xl border font-bold text-xs transition-all ${
+                                    project.builderType === type 
+                                    ? 'bg-indigo-600 border-indigo-600 text-white shadow-sleek' 
+                                    : 'bg-white border-slate-200 text-slate-500 hover:border-indigo-300 hover:text-indigo-600'
+                                }`}
+                            >
+                                {type.replace('-', ' ').toUpperCase()}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+              </div>
+
+              <div className="px-8 py-5 bg-slate-50 border-t border-slate-100 flex items-center justify-between">
+                <div className="flex items-center gap-2 text-indigo-600">
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span className="text-xs font-bold uppercase tracking-wider">Settings Sync Enabled</span>
+                </div>
+                <div className="text-[10px] text-slate-400 italic">Changes are saved automatically to Firestore.</div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
         {activeTab === 'threads' && (
           <div className="max-w-4xl mx-auto space-y-6">
             <div className="flex items-center justify-between">
@@ -644,12 +728,33 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
                         <select 
                           className="bg-slate-50 border border-slate-200 rounded px-1 py-0.5 text-[9px] font-medium text-slate-500 outline-none hover:border-indigo-300 transition-colors"
                           value={engine}
-                          onChange={(e) => setEngine(e.target.value as 'gemini' | 'gemini-pro' | 'groq')}
+                          onChange={(e) => {
+                            const val = e.target.value as 'gemini' | 'gemini-pro' | 'groq';
+                            setEngine(val);
+                            if (val === 'groq' && !model) {
+                              setModel('llama-3.3-70b-versatile');
+                            } else if (val !== 'groq') {
+                              setModel('');
+                            }
+                          }}
                         >
-                          <option value="gemini">Gemini 3.5 Flash</option>
+                          <option value="gemini">Gemini 1.5 Flash</option>
                           <option value="gemini-pro">Gemini 1.5 Pro</option>
-                          <option value="groq">Groq Llama-3</option>
+                          <option value="groq">Groq</option>
                         </select>
+                        {engine === 'groq' && (
+                          <select 
+                            className="bg-slate-50 border border-slate-200 rounded px-1 py-0.5 text-[9px] font-medium text-slate-500 outline-none hover:border-indigo-300 transition-colors"
+                            value={model}
+                            onChange={(e) => setModel(e.target.value)}
+                          >
+                            <option value="llama-3.3-70b-versatile">Llama 3.3 70B</option>
+                            <option value="llama-3.1-70b-versatile">Llama 3.1 70B</option>
+                            <option value="llama-3.1-8b-instant">Llama 3.1 8B (Instant)</option>
+                            <option value="mixtral-8x7b-32768">Mixtral 8x7B</option>
+                            <option value="gemma2-9b-it">Gemma 2 9B</option>
+                          </select>
+                        )}
                       </div>
                       {((previewMode === 'rewritten' && block.content) || (previewMode === 'seo' && block.seoContent)) ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> : <div className="w-1.5 h-1.5 rounded-full bg-slate-200" />}
                     </div>

@@ -1,74 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Helper functions
-    function isSignedIn() {
-      return request.auth != null;
-    }
-
-    function isOwner(userId) {
-      return isSignedIn() && request.auth.uid == userId;
-    }
-
-    function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
-    }
-
-    function incoming() {
-      return request.resource.data;
-    }
-
-    function existing() {
-      return resource.data;
-    }
-
-    // Validation helper for Project
-    function isValidProject(data) {
-      let requiredFields = ['name', 'writingInstructions', 'builderType', 'ownerId', 'createdAt'];
-      return data.keys().hasAll(requiredFields) &&
-             data.keys().size() == 5 &&
-             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
-             data.writingInstructions is string && data.writingInstructions.size() <= 50000 &&
-             data.builderType in ['wp-bakery', 'elementor', 'gutenberg-acf'] &&
-             data.ownerId == request.auth.uid &&
-             data.createdAt == request.time;
-    }
-
-    // Validation helper for Block
-    function isValidBlock(data) {
-      let requiredFields = ['originalCode', 'order', 'projectId', 'content', 'seoContent', 'type', 'name'];
-      return data.keys().hasAll(requiredFields) &&
-             data.originalCode is string && data.originalCode.size() <= 100000 &&
-             data.order is int &&
-             data.projectId is string &&
-             data.content is string &&
-             data.seoContent is string &&
-             data.type is string &&
-             data.name is string &&
-             (!data.keys().hasAll(['isVerbatim']) || data.isVerbatim is bool) &&
-             (!data.keys().hasAll(['layoutDescription']) || data.layoutDescription is string) &&
-             (!data.keys().hasAll(['textPreview']) || data.textPreview is string) &&
-             (!data.keys().hasAll(['cleanHtml']) || data.cleanHtml is string);
-    }
-
-    match /projects/{projectId} {
-      allow read, write: if isSignedIn();
-
-      match /blocks/{blockId} {
-        allow read, write: if isSignedIn();
-      }
-
-      match /pages/{pageId} {
-        allow read, write: if isSignedIn();
-        
-        match /pageBlocks/{pageBlockId} {
-          allow read, write: if isSignedIn();
-        }
-      }
-    }
-
     match /{document=**} {
-      allow read, write: if false;
+      allow read, write: if request.auth != null;
     }
   }
 }

@@ -22,25 +22,31 @@ apiRouter.post("/generate", async (req, res) => {
   }
 
   try {
-    const systemInstruction = `You are a professional WordPress content architect and SEO strategist.
-    Your core mission is to rewrite the content within the provided WordPress block code while strictly preserving its technical structure and syntax.
-    
-    BUILDER TYPE: ${builderType}
-    MODE: ${mode === 'seo' ? 'High-Performance SEO Optimization' : 'Content Transformation'}
-    USER INSTRUCTIONS: ${writingInstructions}
-    SOURCE REPLACEMENT CONTENT (HTML): ${replacementContent ? `Use this content to fill the blocks: ${replacementContent}` : 'Rewrite existing content in the blocks.'}
+    const systemInstruction = `You are an expert Content Migration Specialist and WordPress Architect.
+    Your task is to take a piece of technical code (WordPress block, shortcode, or HTML component) and rewrite its CONTENT using ONLY the provided Source Replacement Content.
 
-    CRITICAL RULES:
-    1. DO NOT change any structural tags, shortcode parameters (like ids, classes, or animation settings), or JSON keys.
-    2. ONLY rewrite the human-readable text values found within shortcode content or JSON values.
-    3. Use the SOURCE REPLACEMENT CONTENT provided above to replace the content in the block while matching the block's current layout/semantic role. 
-    4. For short text or bullet sections, if you use two-column (image/text) layouts, alternate the order automatically (e.g., image-text, then text-image) if placed sequentially.
-    5. For SEO mode: Focus on high-value keywords, semantic relevance, and conversion-oriented copy.
-    6. For Rewrite mode: Strictly follow the user's tone and style requirements.
-    7. RETURN ONLY THE RAW CODE. No markdown boxes, no preambles, no explanations.
-    8. Ensure all escaping is preserved (e.g., if text is inside a JSON string, ensure quotes are escaped correctly).`;
+    Rules for Content Integration:
+    1. STRICTLY PRESERVE the code architecture. Do NOT modify shortcodes, JSON keys, CSS classes, or technical attributes.
+    2. MAP the "Source Replacement Content" to the existing structural fields of the block. 
+    3. REWRITE the facts from the source content to fit the length and tone of the target block. 
+    4. CORE PROTECTION: You MUST preserve all <iframe>, <script>, <form>, <input>, and <style> tags exactly as they are in the TARGET CODE BLOCK. These are mission-critical and must not be omitted, modified, summarized, or "cleaned". 
+    5. DATA INTEGRITY: Use ONLY standard UTF-8 characters. Do not use special encodings, binary-like data, or any non-printable/garbage characters.
+    6. NO-OP RULE: If the TARGET CODE BLOCK appears to be a complex script, an SVG, or a code-only widget that contains no obvious human-readable display text, return it EXACTLY as it is without modification.
+    7. Return ONLY the final raw code output. Strictly avoid markdown code blocks (\`\`\`), preambles, or explanations.
 
-    const prompt = `Rewrite this section code block:\n\n${blockCode}`;
+    CONTEXT:
+    - Builder Type: ${builderType}
+    - User/Writing Instructions: ${writingInstructions}
+    - Mode: ${mode}
+    `;
+
+    const prompt = `
+SOURCE REPLACEMENT CONTENT TO USE:
+${replacementContent}
+
+TARGET CODE BLOCK TO REWRITE:
+${blockCode}
+    `;
 
     let result = "";
 
@@ -51,38 +57,53 @@ apiRouter.post("/generate", async (req, res) => {
           { role: "user", content: prompt }
         ],
         model: model || "llama-3.3-70b-versatile",
+        temperature: 0.1,
       });
       result = completion.choices[0]?.message?.content || "";
     } else if (engine === 'gemini-pro') {
       const response = await genAI.models.generateContent({
         model: model || "gemini-1.5-pro",
         contents: prompt,
-        config: { systemInstruction }
+        config: { systemInstruction, temperature: 0.1 }
       });
       result = response.text || "";
     } else {
       const response = await genAI.models.generateContent({
-        model: model || "gemini-3.5-flash",
+        model: model || "gemini-1.5-flash", 
         contents: prompt,
-        config: { systemInstruction }
+        config: { systemInstruction, temperature: 0.1 }
       });
       result = response.text || "";
     }
 
-    res.json({ result: result.replace(/^```[a-z]*\n/i, "").replace(/\n```$/m, "") });
+    const cleanResult = (text: string) => {
+      // More robust removal of markdown blocks and any leading/trailing whitespace
+      let cleaned = text.trim();
+      cleaned = cleaned.replace(/^```[a-z]*\n/gi, "");
+      cleaned = cleaned.replace(/\n```$/g, "");
+      cleaned = cleaned.replace(/^```/g, "");
+      cleaned = cleaned.replace(/```$/g, "");
+      
+      // Filter out common "garbage" tokens or non-printable segments if they dominate
+      // but preserve UTF-8 generally. 
+      return cleaned.trim();
+    };
+
+    res.json({ result: cleanResult(result) });
   } catch (error: any) {
     console.error("AI Error:", error);
     try {
-      console.log("Attempting fallback to gemini-3.5-flash...");
+      console.log("Attempting fallback to gemini-1.5-pro...");
       const fallbackResponse = await genAI.models.generateContent({
-         model: "gemini-3.5-flash",
-         contents: `Rewrite this section code block:\n\n${blockCode}`,
+         model: "gemini-1.5-pro",
+         contents: `SOURCE REPLACEMENT CONTENT:\n${replacementContent}\n\nTARGET CODE BLOCK:\n${blockCode}`,
          config: {
-            systemInstruction: `You are a professional WordPress content architect and SEO strategist.\nYour core mission is to rewrite the content within the provided WordPress block code while strictly preserving its technical structure and syntax.\nBUILDER TYPE: ${builderType}\nMODE: ${mode === 'seo' ? 'High-Performance SEO Optimization' : 'Content Transformation'}\nUSER INSTRUCTIONS: ${writingInstructions}\nSOURCE REPLACEMENT CONTENT (HTML): ${replacementContent ? 'Use this content to fill the blocks: ' + replacementContent : 'Rewrite existing content in the blocks.'}\nCRITICAL RULES:\n1. DO NOT change any structural tags, shortcode parameters (like ids, classes, or animation settings), or JSON keys.\n2. ONLY rewrite the human-readable text values found within shortcode content or JSON values.\n3. RETURN ONLY THE RAW CODE.`
+            systemInstruction: `You are an expert Content Migration Specialist. Rewrite the TARGET CODE BLOCK content using the facts from SOURCE REPLACEMENT CONTENT. Preserve ALL structural code/shortcodes, especially iframes and scripts. RETURN ONLY RAW CODE.`
          }
       });
       const fallbackResult = fallbackResponse.text || "";
-      res.json({ result: fallbackResult.replace(/^```[a-z]*\n/i, "").replace(/\n```$/m, "") });
+      const cleanedFallback = fallbackResult.replace(/^```[a-z]*\n/gi, "").replace(/\n```$/g, "").trim();
+      res.json({ result: cleanedFallback });
     } catch (fallbackError: any) {
       res.status(500).json({ error: "All generation models failed: " + error.message });
     }
