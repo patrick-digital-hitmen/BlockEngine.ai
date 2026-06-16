@@ -1,0 +1,44 @@
+{
+  "entities": {
+    "Project": {
+      "title": "Project",
+      "description": "A content rewriting project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "writingInstructions": { "type": "string" },
+        "builderType": { "type": "string", "enum": ["wp-bakery", "elementor", "gutenberg-acf"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "ownerId": { "type": "string" }
+      },
+      "required": ["name", "writingInstructions", "builderType", "ownerId"]
+    },
+    "Block": {
+      "title": "Block",
+      "description": "A content block within a project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "originalCode": { "type": "string" },
+        "content": { "type": "string" },
+        "seoContent": { "type": "string" },
+        "order": { "type": "integer" },
+        "type": { "type": "string" },
+        "projectId": { "type": "string" }
+      },
+      "required": ["originalCode", "order", "projectId"]
+    }
+  },
+  "firestore": {
+    "/projects/{projectId}": {
+      "schema": "Project",
+      "description": "User projects"
+    },
+    "/projects/{projectId}/blocks/{blockId}": {
+      "schema": "Block",
+      "description": "Blocks belonging to a project"
+    }
+  }
+}

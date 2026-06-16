@@ -1,0 +1,6 @@
+{
+  "name": "BlockEngine.ai",
+  "description": "A professional content rewriter and SEO optimizer tailored for WordPress page builders like Elementor, WP Bakery, and Gutenberg.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
