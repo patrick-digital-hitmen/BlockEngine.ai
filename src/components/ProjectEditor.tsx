@@ -5,7 +5,7 @@ import { Project, Block, GenerationState, Page } from '../types';
 import { 
   ArrowLeft, Plus, Play, Save, Trash2, Copy, 
   MoveUp, MoveDown, FileCode, CheckCircle2, 
-  AlertCircle, Loader2, Wand2, Download, Eye, FileText
+  AlertCircle, Loader2, Wand2, Download, Eye, FileText, Layers
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ThreadEditor } from './ThreadEditor';
@@ -80,18 +80,30 @@ const decodeWpCode = (code: string) => {
   });
 };
 
+const splitHtmlByH2 = (html: string) => {
+  if (!html) return [];
+  const marked = html.replace(/(<h2[\s>])/gi, '---H2_SPLIT---$1');
+  const parts = marked.split('---H2_SPLIT---');
+  return parts.filter(p => p.trim().length > 0);
+};
+
 export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
   const [activeTab, setActiveTab] = useState<'threads' | 'library' | 'settings'>('threads');
+  const [librarySubTab, setLibrarySubTab] = useState<'components' | 'templates'>('components');
   const [engine, setEngine] = useState<'gemini' | 'gemini-pro' | 'groq'>('gemini');
   const [model, setModel] = useState<string>('');
+  const [disableRewrite, setDisableRewrite] = useState(false);
   const [pages, setPages] = useState<Page[]>([]);
+  const [pageTemplates, setPageTemplates] = useState<any[]>([]);
   const [selectedPage, setSelectedPage] = useState<Page | null>(null);
   const [isCreatingPage, setIsCreatingPage] = useState(false);
-  const [newPage, setNewPage] = useState({ title: '', replacementContent: '' });
+  const [newPage, setNewPage] = useState({ title: '', replacementContent: '', templateId: '' });
 
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [isAddingBlock, setIsAddingBlock] = useState(false);
   const [importMode, setImportMode] = useState<'single' | 'page'>('single');
+  const [saveAsTemplate, setSaveAsTemplate] = useState(true);
+  const [saveToLibrary, setSaveToLibrary] = useState(true);
   const [newBlock, setNewBlock] = useState({ name: '', originalCode: '', type: 'Content/Text Section', layoutDescription: '', textPreview: '', cleanHtml: '' });
   const [genState, setGenState] = useState<GenerationState>({ isGenerating: false, currentBlockIndex: 0, totalBlocks: 0 });
   const [newBlockView, setNewBlockView] = useState<'code' | 'preview'>('code');
@@ -123,17 +135,62 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
     return () => unsubscribe();
   }, [project.id]);
 
+  useEffect(() => {
+    const q = query(collection(db, `projects/${project.id}/templates`));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const templatesData = snapshot.docs.map(doc => ({
+        id: doc.id,
+        ...doc.data()
+      }));
+      setPageTemplates(templatesData);
+    });
+    return () => unsubscribe();
+  }, [project.id]);
+
   const handleCreatePage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newPage.title || !newPage.replacementContent) return;
     try {
-      await addDoc(collection(db, `projects/${project.id}/pages`), {
+      const pageRef = await addDoc(collection(db, `projects/${project.id}/pages`), {
         title: newPage.title,
         replacementContent: newPage.replacementContent,
         projectId: project.id,
         createdAt: new Date()
       });
-      setNewPage({ title: '', replacementContent: '' });
+
+      if (newPage.templateId) {
+         const template = pageTemplates.find(t => t.id === newPage.templateId);
+         if (template && template.blocks) {
+            const batch = writeBatch(db);
+            const sections = splitHtmlByH2(newPage.replacementContent);
+            
+            template.blocks.forEach((tBlock: any, index: number) => {
+               const pBlockRef = doc(collection(db, `projects/${project.id}/pages/${pageRef.id}/pageBlocks`));
+               
+               let mappedSnippet = '';
+               if (index < sections.length && !tBlock.isVerbatim) {
+                  mappedSnippet = sections[index];
+               }
+
+               batch.set(pBlockRef, {
+                 pageId: pageRef.id,
+                 projectId: project.id,
+                 libraryBlockId: tBlock.id || null,
+                 originalCode: tBlock.originalCode || '',
+                 mappedHtmlSnippet: mappedSnippet,
+                 generatedCode: '',
+                 status: 'pending',
+                 order: index,
+                 isVerbatim: tBlock.isVerbatim || false,
+                 name: tBlock.name || `Section ${index + 1}`,
+                 type: tBlock.type || 'Content/Text Section'
+               });
+            });
+            await batch.commit();
+         }
+      }
+
+      setNewPage({ title: '', replacementContent: '', templateId: '' });
       setIsCreatingPage(false);
     } catch (e) {
       console.error(e);
@@ -159,7 +216,7 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           blockCode,
-          model: localStorage.getItem('classifyModel') || 'gemini-3.5-flash'
+          model: localStorage.getItem('classifyModel') || 'llama-3.1-8b-instant'
         })
       });
       return await res.json();
@@ -217,22 +274,65 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
         ? splitBlocks(newBlock.originalCode, project.builderType)
         : [newBlock.originalCode];
 
+      const templateBlocks = [];
+
       for (let i = 0; i < blocksSource.length; i++) {
         const code = blocksSource[i];
+        let blockName = importMode === 'page' ? `${newBlock.name || 'Component'} ${i + 1}` : newBlock.name;
+        let blockType = newBlock.type;
+        let textPreview = '';
+        let cleanHtml = '';
+        let layoutDesc = importMode === 'page' ? extractBasicLayout(code, project.builderType) : (newBlock.layoutDescription || extractBasicLayout(code, project.builderType));
+
+        // Attempt classification for better template data
+        if (importMode === 'page') {
+            try {
+                const data = await classifyCode(code);
+                if (data.name) blockName = data.name;
+                if (data.type) blockType = data.type;
+                if (data.textPreview) textPreview = data.textPreview;
+                if (data.cleanHtml) cleanHtml = data.cleanHtml;
+            } catch (e) {
+                console.error("Classification failed for block", i, e);
+            }
+        }
+
+        if (saveToLibrary || importMode === 'single') {
+            const blockRef = doc(collection(db, `projects/${project.id}/blocks`));
+            batch.set(blockRef, {
+              name: blockName,
+              originalCode: code,
+              type: blockType,
+              layoutDescription: layoutDesc,
+              textPreview: textPreview || '',
+              cleanHtml: cleanHtml || '',
+              projectId: project.id,
+              order: blocks.length + i,
+              content: '',
+              seoContent: ''
+            });
+        }
         
-        const blockRef = doc(collection(db, `projects/${project.id}/blocks`));
-        batch.set(blockRef, {
-          name: importMode === 'page' ? `${newBlock.name || 'Component'} ${i + 1}` : newBlock.name,
-          originalCode: code,
-          type: newBlock.type,
-          layoutDescription: importMode === 'page' ? extractBasicLayout(code, project.builderType) : (newBlock.layoutDescription || extractBasicLayout(code, project.builderType)),
-          textPreview: '',
-          cleanHtml: '',
-          projectId: project.id,
-          order: blocks.length + i,
-          content: '',
-          seoContent: ''
-        });
+        if (saveAsTemplate && importMode === 'page') {
+            templateBlocks.push({
+                id: `tmp_${Date.now()}_${i}`,
+                originalCode: code,
+                type: blockType,
+                layoutDescription: layoutDesc,
+                name: blockName,
+                textPreview: textPreview || '',
+                cleanHtml: cleanHtml || ''
+            });
+        }
+      }
+
+      if (saveAsTemplate && importMode === 'page' && templateBlocks.length > 0) {
+          const tplRef = doc(collection(db, `projects/${project.id}/templates`));
+          batch.set(tplRef, {
+              projectId: project.id,
+              name: newBlock.name || 'Untitled Template',
+              blocks: templateBlocks
+          });
       }
 
       await batch.commit();
@@ -307,8 +407,8 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
            return;
         }
 
-        const generationModel = model || (mode === 'seo' ? localStorage.getItem('seoModel') || 'gemini-1.5-pro' : localStorage.getItem('generateModel') || 'gemini-1.5-flash');
-        const isGroqModel = engine === 'groq' || generationModel.startsWith('llama') || generationModel.startsWith('mixtral');
+        const generationModel = model || (mode === 'seo' ? localStorage.getItem('seoModel') || 'gemini-1.5-pro' : localStorage.getItem('generateModel') || 'llama-3.1-8b-instant');
+        const isGroqModel = engine === 'groq' || generationModel.startsWith('llama') || generationModel.startsWith('meta-llama') || generationModel.startsWith('mixtral') || generationModel.startsWith('gemma');
         
         const response = await fetch('/api/generate', {
           method: 'POST',
@@ -320,7 +420,8 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
             builderType: project.builderType,
             mode: mode,
             engine: engine || (isGroqModel ? 'groq' : 'gemini'),
-            model: generationModel
+            model: generationModel,
+            rewriteContent: !disableRewrite
           })
         });
 
@@ -360,8 +461,20 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
     setGenState(prev => ({ ...prev, isGenerating: false }));
   };
 
+  const encodeWpCode = (code: string) => {
+    if (!code) return code;
+    return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, htmlContent) => {
+        try {
+            return `[vc_raw_html]${btoa(encodeURIComponent(htmlContent.trim()))}[/vc_raw_html]`;
+        } catch {
+            return match;
+        }
+    });
+  };
+
   const handleDownload = () => {
-    const combined = blocks.map(b => previewMode === 'original' ? b.originalCode : (previewMode === 'seo' ? b.seoContent : b.content)).join('\n\n');
+    let combined = blocks.map(b => previewMode === 'original' || b.isVerbatim ? b.originalCode : (previewMode === 'seo' ? b.seoContent || b.originalCode : b.content || b.originalCode)).join('\n\n');
+    combined = encodeWpCode(combined);
     const blob = new Blob([combined], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -522,6 +635,39 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
                     onChange={(e) => setNewPage({ ...newPage, title: e.target.value })}
                   />
                 </div>
+                {pageTemplates.length > 0 && (
+                <div className="space-y-3">
+                  <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Page Template (Optional)</label>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <button
+                        type="button"
+                        onClick={() => setNewPage({ ...newPage, templateId: '' })}
+                        className={`p-4 rounded-xl border-2 transition-all flex flex-col items-center gap-2 ${newPage.templateId === '' ? 'border-indigo-500 bg-indigo-50/50' : 'border-slate-100 hover:border-slate-200'}`}
+                    >
+                        <div className="w-8 h-8 rounded-lg bg-white shadow-sm flex items-center justify-center text-slate-400">
+                            <Plus className="w-4 h-4" />
+                        </div>
+                        <span className="text-xs font-bold text-slate-600">Blank Page</span>
+                    </button>
+                    {pageTemplates.map(t => (
+                        <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => setNewPage({ ...newPage, templateId: t.id })}
+                            className={`p-4 rounded-xl border-2 transition-all flex flex-col items-center gap-2 group ${newPage.templateId === t.id ? 'border-indigo-500 bg-indigo-50/50' : 'border-slate-100 hover:border-slate-200'}`}
+                        >
+                            <div className="w-8 h-8 rounded-lg bg-white shadow-sm flex items-center justify-center text-indigo-500 group-hover:scale-110 transition-transform">
+                                <Layers className="w-4 h-4" />
+                            </div>
+                            <div className="text-center">
+                                <p className="text-xs font-bold text-slate-800 truncate max-w-[100px]">{t.name}</p>
+                                <p className="text-[9px] font-bold text-slate-400 uppercase">{t.blocks?.length || 0} Sec</p>
+                            </div>
+                        </button>
+                    ))}
+                  </div>
+                </div>
+                )}
                 <div>
                   <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-1.5">Source HTML / Replacement Content</label>
                   <textarea
@@ -561,13 +707,43 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
 
         {activeTab === 'library' && (
           <div className="space-y-6">
-            {/* Library Tools Toolbar */}
+            <div className="flex bg-slate-100 p-1.5 rounded-2xl w-fit mb-2 shadow-sm">
+              <button
+                onClick={() => setLibrarySubTab('components')}
+                className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${
+                  librarySubTab === 'components' ? 'bg-white text-indigo-600 shadow-sleek' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                Components
+              </button>
+              <button
+                onClick={() => setLibrarySubTab('templates')}
+                className={`px-6 py-2 rounded-xl text-sm font-bold transition-all ${
+                  librarySubTab === 'templates' ? 'bg-white text-indigo-600 shadow-sleek' : 'text-slate-500 hover:text-slate-700'
+                }`}
+              >
+                Page Templates
+              </button>
+            </div>
+
+            {librarySubTab === 'components' ? (
+              <>
+                {/* Library Tools Toolbar */}
             <div className="flex justify-between items-center bg-white p-4 rounded-xl border border-slate-200 shadow-sm mb-4">
               <div>
                   <h3 className="font-bold text-slate-800">Library Components</h3>
                   <p className="text-xs text-slate-500">Manage components used by your page builder.</p>
               </div>
               <div className="flex items-center gap-2">
+                <label className="flex items-center gap-2 mr-2 text-[11px] font-semibold text-slate-600 bg-white px-3 py-2 rounded-lg border border-slate-200 shadow-sm cursor-pointer hover:border-indigo-300 transition-colors">
+                  <input 
+                    type="checkbox" 
+                    checked={disableRewrite} 
+                    onChange={e => setDisableRewrite(e.target.checked)} 
+                    className="rounded text-indigo-600 focus:ring-indigo-500 w-3 h-3 cursor-pointer" 
+                  />
+                  Disable AI Rewrite
+                </label>
                 <button
                   onClick={handleClassifyAll}
                   className="px-4 py-2 bg-indigo-50 text-indigo-600 font-bold text-xs rounded-lg hover:bg-indigo-100 transition-colors flex items-center gap-2"
@@ -649,7 +825,14 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
                       {isClassifyingBlock[block.id] ? <Loader2 className="w-4 h-4 animate-spin" /> : <Wand2 className="w-4 h-4" />}
                     </button>
                     <button
-                      onClick={() => updateDoc(doc(db, `projects/${project.id}/blocks`, block.id), { isVerbatim: !block.isVerbatim })}
+                      onClick={async () => {
+                        const updates: any = { isVerbatim: !block.isVerbatim };
+                        if (!block.isVerbatim) {
+                           updates.content = block.originalCode;
+                           updates.seoContent = block.originalCode;
+                        }
+                        await updateDoc(doc(db, `projects/${project.id}/blocks`, block.id), updates);
+                      }}
                       className={`p-2 rounded-lg transition-all text-xs font-bold ${block.isVerbatim ? 'text-emerald-600 bg-emerald-50 hover:bg-emerald-100' : 'text-slate-400 hover:text-indigo-600 hover:bg-indigo-50'}`}
                       title="Toggle Verbatim (Do not modify code)"
                     >
@@ -849,6 +1032,30 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
                     </div>
                 </div>
 
+                {importMode === 'page' && (
+                  <div className="flex flex-col gap-3 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                     <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Save Options</p>
+                     <label className="flex items-center gap-3 cursor-pointer group">
+                        <input 
+                           type="checkbox" 
+                           checked={saveToLibrary} 
+                           onChange={e => setSaveToLibrary(e.target.checked)}
+                           className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300"
+                        />
+                        <span className="text-sm font-semibold text-slate-700 group-hover:text-indigo-600 transition-colors">Add all sections to Architect Library</span>
+                     </label>
+                     <label className="flex items-center gap-3 cursor-pointer group">
+                        <input 
+                           type="checkbox" 
+                           checked={saveAsTemplate} 
+                           onChange={e => setSaveAsTemplate(e.target.checked)}
+                           className="w-4 h-4 rounded text-indigo-600 focus:ring-indigo-500 border-slate-300"
+                        />
+                        <span className="text-sm font-semibold text-slate-700 group-hover:text-indigo-600 transition-colors">Save page layout as a Reusable Template</span>
+                     </label>
+                  </div>
+                )}
+
                 <div>
                     <div className="flex items-center justify-between mb-2">
                         <label className="block text-xs font-bold text-slate-400 uppercase tracking-wider">
@@ -945,6 +1152,85 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
             </div>
           )}
           </div>
+              </>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <AnimatePresence>
+                    {pageTemplates.map(template => (
+                        <motion.div
+                            key={template.id}
+                            initial={{ opacity: 0, scale: 0.95 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.95 }}
+                            className="bg-white rounded-3xl border border-slate-200 shadow-sleek overflow-hidden group hover:border-indigo-400 hover:shadow-sleek-lg transition-all flex flex-col"
+                        >
+                            <div className="p-6 border-b border-slate-50 relative">
+                                <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center text-indigo-600 mb-4 group-hover:scale-110 transition-transform">
+                                    <Layers className="w-6 h-6" />
+                                </div>
+                                <h4 className="font-bold text-slate-800 text-lg leading-tight">{template.name}</h4>
+                                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1.5">{template.blocks?.length || 0} Architect Sections</p>
+                                
+                                <button 
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        if (confirm('Delete this page template?')) {
+                                            deleteDoc(doc(db, `projects/${project.id}/templates`, template.id));
+                                        }
+                                    }}
+                                    className="absolute top-6 right-6 p-2 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all"
+                                >
+                                    <Trash2 className="w-4 h-4" />
+                                </button>
+                            </div>
+                            <div className="p-5 bg-slate-50/50 flex-1 space-y-3">
+                                <div className="space-y-2">
+                                    {template.blocks?.slice(0, 5).map((b: any, i: number) => (
+                                        <div key={i} className="flex items-start gap-3 p-2 bg-white/60 rounded-xl border border-white shadow-sm">
+                                            <div className="w-5 h-5 bg-indigo-100 rounded-lg flex items-center justify-center text-[10px] font-bold text-indigo-600 shrink-0">
+                                                {i + 1}
+                                            </div>
+                                            <div className="min-w-0 flex-1">
+                                                <p className="text-[11px] font-bold text-slate-700 truncate">{b.name}</p>
+                                                <p className="text-[9px] text-slate-400 font-medium truncate italic">{b.type}</p>
+                                            </div>
+                                        </div>
+                                    ))}
+                                    {template.blocks?.length > 5 && (
+                                        <div className="text-center py-1">
+                                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">+ {template.blocks.length - 5} more sections</p>
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                            <div className="p-5 bg-white border-t border-slate-100">
+                                <button
+                                    onClick={() => {
+                                        setNewPage({ title: `New ${template.name}`, replacementContent: '', templateId: template.id });
+                                        setIsCreatingPage(true);
+                                    }}
+                                    className="w-full py-2.5 bg-indigo-600 text-white hover:bg-indigo-700 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-sm"
+                                >
+                                    <Plus className="w-3.5 h-3.5" />
+                                    Use Template
+                                </button>
+                            </div>
+                        </motion.div>
+                    ))}
+                    {pageTemplates.length === 0 && (
+                        <div className="col-span-full py-20 flex flex-col items-center justify-center text-slate-400 gap-4 bg-white rounded-3xl border-2 border-dashed border-slate-100">
+                            <div className="mx-auto w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center mb-4 text-indigo-200 border border-slate-100 shadow-inner">
+                                <Layers className="w-8 h-8" />
+                            </div>
+                            <div className="text-center">
+                                <p className="font-bold text-slate-600">No Page Templates Saved</p>
+                                <p className="text-xs text-slate-400 mt-1">Check "Save as Page Template" when importing a full page.</p>
+                            </div>
+                        </div>
+                    )}
+                </AnimatePresence>
+              </div>
+            )}
           </div>
         )}
       </div>

@@ -13,99 +13,140 @@ const genAI = new GoogleGenAI({
 
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
 
+// Helpers for WPBakery base64 encoded HTML
+const decodeWpCode = (code: string) => {
+  if (!code) return code;
+  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, b64) => {
+    try {
+      // WPBakery uses URL encoding THEN Base64 encoding for raw HTML
+      return `[vc_raw_html]${decodeURIComponent(Buffer.from(b64.trim(), "base64").toString())}[/vc_raw_html]`;
+    } catch {
+      return match;
+    }
+  });
+};
+
+const encodeWpCode = (code: string) => {
+  if (!code) return code;
+  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, htmlContent) => {
+    try {
+      return `[vc_raw_html]${Buffer.from(encodeURIComponent(htmlContent.trim())).toString("base64")}[/vc_raw_html]`;
+    } catch {
+      return match;
+    }
+  });
+};
+
 // AI Generation Route
 apiRouter.post("/generate", async (req, res) => {
-  const { blockCode, writingInstructions, replacementContent, builderType, mode, engine = 'gemini', model } = req.body;
+  const { blockCode, writingInstructions, replacementContent, builderType, mode, engine = 'gemini', model, rewriteContent, globalButtonText } = req.body;
+
+  const shouldRewrite = rewriteContent !== false; // Defaults to true
+  const decodedBlockCode = decodeWpCode(blockCode);
 
   if (!blockCode || !writingInstructions || !builderType) {
     return res.status(400).json({ error: "Missing required fields" });
   }
 
+  let resolvedEngine = engine;
+  const activeModel = model || "gemini-3.5-flash";
+  if (activeModel.startsWith("llama") || activeModel.startsWith("meta-llama") || activeModel.startsWith("mixtral") || activeModel.startsWith("gemma")) {
+    resolvedEngine = "groq";
+  }
+
   try {
-    const systemInstruction = `You are an expert Content Migration Specialist and WordPress Architect.
-    Your task is to take a piece of technical code (WordPress block, shortcode, or HTML component) and rewrite its CONTENT using ONLY the provided Source Replacement Content.
+    let systemInstruction = `You are an expert Content Migration Specialist and WordPress Architect.
+Your absolute priority is to REWRITE the provided TARGET CODE BLOCK using ONLY the facts from the SOURCE REPLACEMENT CONTENT.
 
-    Rules for Content Integration:
-    1. STRICTLY PRESERVE the code architecture. Do NOT modify shortcodes, JSON keys, CSS classes, or technical attributes.
-    2. MAP the "Source Replacement Content" to the existing structural fields of the block. 
-    3. REWRITE the facts from the source content to fit the length and tone of the target block. 
-    4. CORE PROTECTION: You MUST preserve all <iframe>, <script>, <form>, <input>, and <style> tags exactly as they are in the TARGET CODE BLOCK. These are mission-critical and must not be omitted, modified, summarized, or "cleaned". 
-    5. DATA INTEGRITY: Use ONLY standard UTF-8 characters. Do not use special encodings, binary-like data, or any non-printable/garbage characters.
-    6. NO-OP RULE: If the TARGET CODE BLOCK appears to be a complex script, an SVG, or a code-only widget that contains no obvious human-readable display text, return it EXACTLY as it is without modification.
-    7. Return ONLY the final raw code output. Strictly avoid markdown code blocks (\`\`\`), preambles, or explanations.
+CRITICAL TOPIC REPLACEMENT RULE:
+- The TARGET CODE BLOCK is just a structural template. You MUST REPLACE ALL text, numbers, and lists from the old topic with the new facts from the SOURCE REPLACEMENT CONTENT. 
+- Example: If the block is about "Company Registration" and the new content is about "Trust Establishment", you MUST remove "Company Registration" entirely and use "Trust Establishment" everywhere it is appropriate.
 
-    CONTEXT:
-    - Builder Type: ${builderType}
-    - User/Writing Instructions: ${writingInstructions}
-    - Mode: ${mode}
-    `;
+Rules for Content integration:
+1. STRICTLY PRESERVE the code architecture. Do NOT modify shortcodes (vc_row, vc_column, etc.), JSON keys, CSS classes, or technical attributes.
+2. MAP the "Source Replacement Content" to the existing structural fields. Replace all old human-readable text.
+3. ${shouldRewrite ? 'REWRITE the facts from the source content to fit the length and style of the target block. Feel free to rephrase.' : 'Inject the Source Replacement Content exactly as it reads.'}
+4. HTML FORMATTING: If generating list items, wrap short descriptors in <strong> tags (e.g., <li><strong>Descriptor</strong> Elaborating sentence</li>).
+5. ENCODED RAW HTML: If you encounter a [vc_raw_html] shortcode, the content is already decoded for you in the prompt. Update the readable text within it while preserving structure, then the system will re-encode it.
+6. Return ONLY the final raw code. No markdown boxes, no talk.`;
 
-    const prompt = `
-SOURCE REPLACEMENT CONTENT TO USE:
+    if (resolvedEngine === 'groq') {
+       systemInstruction += `\n\nCRITICAL: DO NOT output binary characters or mojibake.`;
+    }
+
+    const promptMessage = `
+SOURCE REPLACEMENT CONTENT (FACTS TO USE):
 ${replacementContent}
 
-TARGET CODE BLOCK TO REWRITE:
-${blockCode}
+TARGET CODE BLOCK TO REWRITE (STRUCTURAL TEMPLATE):
+${decodedBlockCode}
+
+CONTEXT:
+- Builder: ${builderType}
+- Specific Instructions: ${writingInstructions}
+- Mode: ${mode}
+${globalButtonText ? `- Button Overwrite: "${globalButtonText}"` : ''}
     `;
 
     let result = "";
 
-    if (engine === 'groq' && groq) {
+    if (resolvedEngine === 'groq' && groq) {
       const completion = await groq.chat.completions.create({
         messages: [
           { role: "system", content: systemInstruction },
-          { role: "user", content: prompt }
+          { role: "user", content: promptMessage }
         ],
-        model: model || "llama-3.3-70b-versatile",
+        model: activeModel === "gemini-3.5-flash" || activeModel === "gemini-1.5-flash" ? "llama-3.3-70b-versatile" : activeModel,
         temperature: 0.1,
       });
       result = completion.choices[0]?.message?.content || "";
-    } else if (engine === 'gemini-pro') {
-      const response = await genAI.models.generateContent({
-        model: model || "gemini-1.5-pro",
-        contents: prompt,
-        config: { systemInstruction, temperature: 0.1 }
-      });
-      result = response.text || "";
     } else {
-      const response = await genAI.models.generateContent({
-        model: model || "gemini-1.5-flash", 
-        contents: prompt,
-        config: { systemInstruction, temperature: 0.1 }
+      // Default to Gemini 3.x models
+      const geminiModel = activeModel === "gemini-1.5-pro" || activeModel === "gemini-3.1-pro-preview" ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
+      
+      const response = await (genAI as any).models.generateContent({
+        model: geminiModel,
+        contents: [{ role: "user", parts: [{ text: promptMessage }] }],
+        config: { 
+          systemInstruction, 
+          temperature: 0.1 
+        }
       });
       result = response.text || "";
     }
 
     const cleanResult = (text: string) => {
-      // More robust removal of markdown blocks and any leading/trailing whitespace
       let cleaned = text.trim();
       cleaned = cleaned.replace(/^```[a-z]*\n/gi, "");
       cleaned = cleaned.replace(/\n```$/g, "");
       cleaned = cleaned.replace(/^```/g, "");
       cleaned = cleaned.replace(/```$/g, "");
-      
-      // Filter out common "garbage" tokens or non-printable segments if they dominate
-      // but preserve UTF-8 generally. 
       return cleaned.trim();
     };
 
-    res.json({ result: cleanResult(result) });
+    const finalResult = encodeWpCode(cleanResult(result));
+    
+    if (finalResult.includes("\uFFFD") || (finalResult.match(/[^\x20-\x7E\s]/g) && (finalResult.match(/[^\x20-\x7E\s]/g)!.length > finalResult.length * 0.2))) {
+       throw new Error("GARBAGE_OUTPUT_DETECTED");
+    }
+
+    res.json({ result: finalResult });
   } catch (error: any) {
     console.error("AI Error:", error);
     try {
-      console.log("Attempting fallback to gemini-1.5-pro...");
-      const fallbackResponse = await genAI.models.generateContent({
-         model: "gemini-1.5-pro",
-         contents: `SOURCE REPLACEMENT CONTENT:\n${replacementContent}\n\nTARGET CODE BLOCK:\n${blockCode}`,
+      const fallbackResponse = await (genAI as any).models.generateContent({
+         model: "gemini-3.1-pro-preview",
+         contents: [{ role: "user", parts: [{ text: `SOURCE REPLACEMENT CONTENT:\n${replacementContent}\n\nTARGET CODE BLOCK:\n${blockCode}` }] }],
          config: {
-            systemInstruction: `You are an expert Content Migration Specialist. Rewrite the TARGET CODE BLOCK content using the facts from SOURCE REPLACEMENT CONTENT. Preserve ALL structural code/shortcodes, especially iframes and scripts. RETURN ONLY RAW CODE.`
+            systemInstruction: `You are an expert Content Migration Specialist. Rewrite the TARGET CODE BLOCK content using the facts from SOURCE REPLACEMENT CONTENT. Preserve ALL structural code/shortcodes. RETURN ONLY RAW CODE.`,
+            temperature: 0.1
          }
       });
       const fallbackResult = fallbackResponse.text || "";
       const cleanedFallback = fallbackResult.replace(/^```[a-z]*\n/gi, "").replace(/\n```$/g, "").trim();
-      res.json({ result: cleanedFallback });
+      res.json({ result: encodeWpCode(cleanedFallback) });
     } catch (fallbackError: any) {
-      res.status(500).json({ error: "All generation models failed: " + error.message });
+      res.json({ result: blockCode });
     }
   }
 });
@@ -115,46 +156,30 @@ apiRouter.post("/classify", async (req, res) => {
   const { blockCode, model } = req.body;
   if (!blockCode) return res.status(400).json({ error: "Missing blockcode" });
 
-  // Determine engine based on model name
-  const isGroqModel = model && (model.startsWith("llama") || model.startsWith("mixtral") || model.startsWith("gemma"));
+  const decodedBlockCode = decodeWpCode(blockCode);
+  const isGroqModel = model && (model.startsWith("llama") || model.startsWith("meta-llama") || model.startsWith("mixtral") || model.startsWith("gemma"));
 
-  const systemInstruction = `Role: You are a strict UX/UI Blueprint Architect. Your task is to analyze raw website code (such as WordPress Bakery shortcodes or custom HTML) and classify the section into a generic, industry-standard wireframe component name AND determine its primary structural type.
+  const systemInstruction = `Role: You are a strict UX/UI Blueprint Architect. Your task is to analyze raw website code and classify the section into a generic, industry-standard wireframe component name AND determine its primary structural type.
 
-CRITICAL RULE 1: You must *never* use specific brand names, industry keywords, or verbs found in the page text. Do not look at the text "Expert 4x4 Mechanical Repair" and name it "4x4 Repair Layout".
-CRITICAL RULE 2: Focus purely on structural intent, content layout, and user-interface conventions.
-APPROVED CORE WIREFRAME DICTIONARY:
-* Hero Section (The absolute top section of a page; usually features a prominent heading, introductory text, and a primary call-to-action button).
-* Services Grid / Features Grid (A multi-column grid layout or card collection used to display offerings, core capabilities, or value pillars).
-* Image + Text (A balanced 2-column structural layout with a visual graphic/image on the left and descriptive paragraph text/headings on the right).
-* Text + Image (A balanced 2-column structural layout with descriptive paragraph text/headings on the left and a visual graphic/image on the right).
-* Trust Bar (A compact horizontal row displaying partner logos, industry certifications, associations, or quick benefit badges).
-* Reviews / Testimonials (A dedicated container displaying user quotes, social proof sliders, or embedded third-party review widgets).
-* Pricing Grid (Tables, comparative lists, or structured columns showcasing tier lists, package costs, or service pricing models).
-* FAQ Section (A layout primarily dedicated to resolving frequent user queries; often utilizing toggle systems, lists, or structural FAQ nodes).
-* About Us / Content Block (General layout containing editorial paragraphs, company mission statements, or general overview copy).
-* Contact Form / CTA (High-intent conversion areas featuring interactive forms, reservation widgets, input fields, maps, or direct communication callouts).
+CRITICAL RULE: Never use brand names or industry keywords.
+CORE DICTIONARY: Hero Section, Services Grid, Image + Text, Trust Bar, Reviews, Pricing Grid, FAQ Section, About Us, Contact Form.
 
-HANDLING COMPONENT EXTENSIONS & OUTLIERS:
-If a section contains a distinct interactive UI pattern or explicit fallback layout not covered natively by the core list above, you are permitted to construct a generic wireframe name by appending or utilizing standard UX terminology. Examples include:
-* [Component Name] Slider / [Component Name] Carousel (e.g., Hero Slider, Testimonial Carousel)
-* Accordion Section (For stacked interactive disclosure panels containing heavy data or documentation outside of FAQs)
-* Tabbed Content Block (For layouts using navigation tabs to swap out visible structural containers)
-* Gallery / Portfolio Grid (For layouts showcasing a mosaic or matrix of image/media nodes)
-* Process / Steps Flow (For step-by-step numbers, timelines, or linear workflow graphs)
-
-Return a JSON object with strictly these keys:
-- "type": classify its primary structural purpose. Choose ONLY from: Hero Section, Call to Action, Services/Features Grid, Pricing Table, Testimonials/Trust Bar, Content/Text Section, Image Gallery, Header/Footer, FAQ/Accordion.
-- "name": Using the rules and CORE WIREFRAME DICTIONARY above, output ONLY the final chosen structural name as a clean string. Do not include quotes, periods, introductory filler text, or technical explanations.
-- "textPreview": extract a short snippet (max 100 chars) of the most prominent readable text in the block.
-- "cleanHtml": Extract ONLY the pure HTML tags and readable text. Remove ALL shortcodes, JSON config, and wrappers. Return basic HTML like <h1>...</h1><p>...</p>.
+Return JSON:
+{
+  "type": "Primary Purpose",
+  "name": "Component Name",
+  "textPreview": "Max 100 chars text",
+  "cleanHtml": "Pure HTML extract"
+}
 
 Code:
-${blockCode.substring(0, 3500)}`;
+${decodedBlockCode.substring(0, 3500)}`;
 
   const classifyWithGemini = async (mdl: string) => {
+    const geminiMdl = mdl === "gemini-1.5-flash" ? "gemini-3.5-flash" : mdl;
     const resp = await (genAI as any).models.generateContent({
-      model: mdl,
-      contents: systemInstruction,
+      model: geminiMdl,
+      contents: [{ role: "user", parts: [{ text: systemInstruction }] }],
       config: { 
         temperature: 0.1,
         responseMimeType: "application/json"
@@ -178,13 +203,13 @@ ${blockCode.substring(0, 3500)}`;
     let data: any = {};
     try {
       if (isGroqModel) {
-        data = await classifyWithGroq(model);
+        data = await classifyWithGroq(model || "llama-3.1-8b-instant");
       } else {
-        data = await classifyWithGemini(model || "gemini-3.5-flash");
+        data = await classifyWithGemini(model || "gemini-1.5-flash");
       }
     } catch (primaryError) {
-      console.error("Primary classification failed, falling back to gemini-3.5-flash...", primaryError);
-      data = await classifyWithGemini("gemini-3.5-flash");
+      console.error("Primary classification failed, falling back to gemini-1.5-flash...", primaryError);
+      data = await classifyWithGemini("gemini-1.5-flash");
     }
     
     res.json({ 

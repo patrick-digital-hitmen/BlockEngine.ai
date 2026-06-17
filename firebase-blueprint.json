@@ -26,9 +26,58 @@
         "seoContent": { "type": "string" },
         "order": { "type": "integer" },
         "type": { "type": "string" },
-        "projectId": { "type": "string" }
+        "projectId": { "type": "string" },
+        "layoutDescription": { "type": "string" },
+        "textPreview": { "type": "string" },
+        "cleanHtml": { "type": "string" },
+        "isVerbatim": { "type": "boolean" }
       },
       "required": ["originalCode", "order", "projectId"]
+    },
+    "Page": {
+      "title": "Page",
+      "description": "A page thread within a project",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "title": { "type": "string" },
+        "replacementContent": { "type": "string" },
+        "projectId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "replacementContent", "projectId"]
+    },
+    "PageBlock": {
+      "title": "PageBlock",
+      "description": "A block specific to a page",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "pageId": { "type": "string" },
+        "projectId": { "type": "string" },
+        "libraryBlockId": { "type": "string" },
+        "originalCode": { "type": "string" },
+        "mappedHtmlSnippet": { "type": "string" },
+        "generatedCode": { "type": "string" },
+        "status": { "type": "string" },
+        "order": { "type": "integer" },
+        "isVerbatim": { "type": "boolean" },
+        "name": { "type": "string" },
+        "type": { "type": "string" }
+      },
+      "required": ["pageId", "projectId", "status", "order"]
+    },
+    "Template": {
+      "title": "Template",
+      "description": "A saved page template",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "projectId": { "type": "string" },
+        "name": { "type": "string" },
+        "blocks": { "type": "array" }
+      },
+      "required": ["projectId", "name"]
     }
   },
   "firestore": {
@@ -39,6 +88,18 @@
     "/projects/{projectId}/blocks/{blockId}": {
       "schema": "Block",
       "description": "Blocks belonging to a project"
+    },
+    "/projects/{projectId}/pages/{pageId}": {
+      "schema": "Page",
+      "description": "Pages belonging to a project"
+    },
+    "/projects/{projectId}/pages/{pageId}/pageBlocks/{pageBlockId}": {
+      "schema": "PageBlock",
+      "description": "Blocks specific to a page thread"
+    },
+    "/projects/{projectId}/templates/{templateId}": {
+      "schema": "Template",
+      "description": "Page templates for a project"
     }
   }
 }

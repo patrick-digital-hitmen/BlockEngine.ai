@@ -26,6 +26,14 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
   const [isGeneratingAll, setIsGeneratingAll] = useState(false);
   const [engine, setEngine] = useState<'gemini' | 'gemini-pro' | 'groq'>('gemini');
   const [model, setModel] = useState<string>('');
+  const [disableRewrite, setDisableRewrite] = useState(false);
+
+  const [globalButtonText, setGlobalButtonText] = useState(page.globalButtonText || '');
+
+  const updateGlobalButtonText = async (val: string) => {
+    setGlobalButtonText(val);
+    await updateDoc(doc(db, `projects/${project.id}/pages`, page.id), { globalButtonText: val });
+  };
 
   useEffect(() => {
     const q = query(collection(db, `projects/${project.id}/pages/${page.id}/pageBlocks`), orderBy('order', 'asc'));
@@ -121,6 +129,15 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
     });
   };
 
+  const handleUpdateMappedHtml = async (blockId: string, newValue: string) => {
+    try {
+      const blockRef = doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, blockId);
+      await updateDoc(blockRef, { mappedHtmlSnippet: newValue });
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
   const handleGenerate = async (pBlock: PageBlock) => {
     try {
       const blockRef = doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, pBlock.id);
@@ -141,7 +158,9 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
           builderType: project.builderType,
           mode: 'rewrite', // Defaults to rewrite in threads
           engine: engine,
-          model: model
+          model: model,
+          rewriteContent: !disableRewrite,
+          globalButtonText: globalButtonText
         })
       });
 
@@ -188,8 +207,20 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
     }
   };
 
+  const encodeWpCode = (code: string) => {
+    if (!code) return code;
+    return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, htmlContent) => {
+        try {
+            return `[vc_raw_html]${btoa(encodeURIComponent(htmlContent.trim()))}[/vc_raw_html]`;
+        } catch {
+            return match;
+        }
+    });
+  };
+
   const handleDownload = () => {
-    const combined = pageBlocks.map(b => b.generatedCode || b.originalCode).join('\n\n');
+    let combined = pageBlocks.map(b => b.isVerbatim ? b.originalCode : (b.generatedCode || b.originalCode)).join('\n\n');
+    combined = encodeWpCode(combined);
     const blob = new Blob([combined], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -250,6 +281,16 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
             </select>
           )}
 
+          <label className="flex items-center gap-2 mr-2 text-[12px] font-semibold text-slate-600 bg-white px-3 py-2 rounded-xl border border-slate-200 shadow-sm cursor-pointer hover:border-indigo-300 transition-colors">
+            <input 
+              type="checkbox" 
+              checked={disableRewrite} 
+              onChange={e => setDisableRewrite(e.target.checked)} 
+              className="rounded text-indigo-600 focus:ring-indigo-500 w-3.5 h-3.5 cursor-pointer" 
+            />
+            Disable AI Rewrite
+          </label>
+
           <button
             onClick={handleGenerateAll}
             disabled={pageBlocks.length === 0 || isGeneratingAll}
@@ -276,6 +317,17 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
           <div className="px-5 py-3 border-b border-slate-100 bg-slate-50/50">
             <h3 className="font-bold text-slate-700 text-sm">Source HTML For This Page</h3>
             <p className="text-[10px] text-slate-400">Content that will be injected into components</p>
+          </div>
+          <div className="px-5 py-4 border-b border-slate-100 bg-white space-y-2">
+            <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider">Page-Wide CTA Button Text</label>
+            <p className="text-[10px] text-slate-500 mb-2 leading-relaxed text-balance">If set, general buttons linking out to external forms will use this text. If empty, the link URL will be naturalized.</p>
+            <input 
+              type="text" 
+              className="w-full px-3 py-2 border border-slate-200 rounded-lg text-sm bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all font-medium"
+              placeholder="e.g. Book Now" 
+              value={globalButtonText}
+              onChange={(e) => updateGlobalButtonText(e.target.value)} 
+            />
           </div>
           <div className="flex-1 p-5 overflow-auto bg-slate-900 text-slate-300 font-mono text-[11px] leading-relaxed relative">
              <div className="absolute top-4 right-4 text-[9px] uppercase tracking-wider font-bold text-slate-500 bg-slate-800 px-2 py-1 rounded">Read-Only</div>
@@ -368,10 +420,18 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                       </div>
                       
                       <div className="flex items-center gap-2">
+                        <label className="flex items-center gap-1.5 cursor-pointer group">
+                           <input type="checkbox" checked={block.isVerbatim || false} onChange={async (e) => {
+                             const updates: any = { isVerbatim: e.target.checked };
+                             if (e.target.checked) updates.generatedCode = block.originalCode;
+                             await updateDoc(doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, block.id), updates);
+                           }} className="w-3.5 h-3.5 rounded text-emerald-500 focus:ring-emerald-500 border-slate-300" />
+                           <span className="text-[10px] font-bold text-slate-500 group-hover:text-emerald-600 transition-colors uppercase tracking-wider">Verbatim</span>
+                        </label>
                         <button
                           onClick={() => handleGenerate(block)}
                           disabled={block.status === 'generating'}
-                          className="bg-slate-100 hover:bg-indigo-50 text-indigo-600 font-bold text-xs py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition-all disabled:opacity-50"
+                          className="bg-slate-100 hover:bg-indigo-50 text-indigo-600 font-bold text-xs py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition-all disabled:opacity-50 ml-2"
                         >
                           {block.status === 'generating' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
                           {block.status === 'completed' && !block.isVerbatim ? 'Regenerate' : 'Generate'}
@@ -382,10 +442,19 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                       </div>
                     </div>
                     
-                    {block.mappedHtmlSnippet && (
+                    {(!block.isVerbatim) && (
                       <div className="px-5 py-3 bg-slate-50 border-b border-slate-100">
                         <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Mapped HTML Content</div>
-                        <div className="font-mono text-[10px] text-slate-600 max-h-32 overflow-y-auto whitespace-pre-wrap p-3 bg-white border border-slate-200 rounded text-clip">{block.mappedHtmlSnippet.slice(0, 300)}{block.mappedHtmlSnippet.length > 300 ? '...' : ''}</div>
+                        <textarea 
+                          className="font-mono text-[10px] text-slate-600 w-full min-h-[80px] p-3 bg-white border border-slate-200 rounded resize-y focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                          defaultValue={block.mappedHtmlSnippet || ''}
+                          onBlur={(e) => {
+                            if (e.target.value !== (block.mappedHtmlSnippet || '')) {
+                               handleUpdateMappedHtml(block.id, e.target.value);
+                            }
+                          }}
+                          placeholder="Paste or edit the HTML content snippet you want mapped to this section..."
+                        />
                       </div>
                     )}
                     

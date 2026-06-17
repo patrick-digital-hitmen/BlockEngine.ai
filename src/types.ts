@@ -30,6 +30,7 @@ export interface Page {
   projectId: string;
   title: string;
   replacementContent?: string;
+  globalButtonText?: string;
   createdAt: any;
 }
 
@@ -46,6 +47,18 @@ export interface PageBlock {
   isVerbatim: boolean;
   name: string;
   type: string;
+}
+
+export interface PageTemplate {
+  id: string;
+  projectId: string;
+  name: string;
+  blocks: {
+    originalCode: string;
+    type: string;
+    layoutDescription: string;
+    name: string;
+  }[];
 }
 
 export interface GenerationState {

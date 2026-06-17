@@ -8,8 +8,8 @@ interface SettingsModalProps {
 }
 
 export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
-  const [classifyModel, setClassifyModel] = React.useState(localStorage.getItem('classifyModel') || 'gemini-1.5-flash');
-  const [generateModel, setGenerateModel] = React.useState(localStorage.getItem('generateModel') || 'gemini-1.5-flash');
+  const [classifyModel, setClassifyModel] = React.useState(localStorage.getItem('classifyModel') || 'llama-3.1-8b-instant');
+  const [generateModel, setGenerateModel] = React.useState(localStorage.getItem('generateModel') || 'llama-3.1-8b-instant');
   const [seoModel, setSeoModel] = React.useState(localStorage.getItem('seoModel') || 'gemini-1.5-pro');
 
   const handleSave = () => {
@@ -60,6 +60,11 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash Exp (Experimental)</option>
                 <option value="gemini-1.5-pro">Gemini 1.5 Pro (Balanced for complex structures)</option>
                 <option value="llama-3.3-70b-versatile">Llama 3.3 70B (Via Groq - Super Fast)</option>
+                <option value="llama-3.1-70b-versatile">Llama 3.1 70B (Via Groq)</option>
+                <option value="llama-3.1-8b-instant">Llama 3.1 8B (Via Groq - Instant)</option>
+                <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout 17B (Via Groq)</option>
+                <option value="mixtral-8x7b-32768">Mixtral 8x7B (Via Groq)</option>
+                <option value="gemma2-9b-it">Gemma 2 9B (Via Groq)</option>
               </select>
             </div>
 
@@ -83,6 +88,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 <option value="llama-3.3-70b-versatile">Llama 3.3 70B (Via Groq - Super Fast)</option>
                 <option value="llama-3.1-70b-versatile">Llama 3.1 70B (Via Groq - Proven Versatile)</option>
                 <option value="llama-3.1-8b-instant">Llama 3.1 8B (Via Groq - Ultra Fast / High Limits)</option>
+                <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout 17B (Via Groq)</option>
                 <option value="mixtral-8x7b-32768">Mixtral 8x7B (Via Groq - High throughput)</option>
               </select>
             </div>
@@ -107,6 +113,7 @@ export function SettingsModal({ isOpen, onClose }: SettingsModalProps) {
                 <option value="llama-3.3-70b-versatile">Llama 3.3 70B (Via Groq)</option>
                 <option value="llama-3.1-70b-versatile">Llama 3.1 70B (Via Groq)</option>
                 <option value="llama-3.1-8b-instant">Llama 3.1 8B (Via Groq)</option>
+                <option value="meta-llama/llama-4-scout-17b-16e-instruct">Llama 4 Scout 17B (Via Groq)</option>
                 <option value="mixtral-8x7b-32768">Mixtral 8x7B (Via Groq)</option>
               </select>
             </div>
