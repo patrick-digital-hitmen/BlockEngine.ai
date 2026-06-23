@@ -1,7 +1,7 @@
 import express from "express";
 import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
-import { tryPatchWpBakeryWithSchema } from "./wpBakerySchemaPatcher";
+import { tryPatchWpBakeryWithSchema } from "./wpBakerySchemaPatcher.js";
 
 export const apiRouter = express.Router();
 

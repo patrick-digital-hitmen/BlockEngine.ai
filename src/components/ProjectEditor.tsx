@@ -94,6 +94,24 @@ const normalizeWpCodeForExport = (code: string) => {
   });
 };
 
+const readApiJson = async (response: Response) => {
+  const text = await response.text();
+  let data: any;
+
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    const preview = text.replace(/\s+/g, ' ').trim().slice(0, 500);
+    throw new Error(preview || `API returned ${response.status} ${response.statusText}`);
+  }
+
+  if (!response.ok || data.error) {
+    throw new Error(data.error || `API returned ${response.status} ${response.statusText}`);
+  }
+
+  return data;
+};
+
 export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
   const [activeTab, setActiveTab] = useState<'threads' | 'library' | 'settings'>('threads');
   const [librarySubTab, setLibrarySubTab] = useState<'components' | 'templates'>('components');
@@ -429,8 +447,7 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
           })
         });
 
-        const data = await response.json();
-        if (data.error) throw new Error(data.error);
+        const data = await readApiJson(response);
 
         const blockRef = doc(db, `projects/${project.id}/blocks`, block.id);
         await updateDoc(blockRef, {

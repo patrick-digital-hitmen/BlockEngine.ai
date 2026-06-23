@@ -27,6 +27,24 @@ const stableHash = (value: string) => {
   return (hash >>> 0).toString(36);
 };
 
+const readApiJson = async (response: Response) => {
+  const text = await response.text();
+  let data: any;
+
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    const preview = text.replace(/\s+/g, ' ').trim().slice(0, 500);
+    throw new Error(preview || `API returned ${response.status} ${response.statusText}`);
+  }
+
+  if (!response.ok || data.error) {
+    throw new Error(data.error || `API returned ${response.status} ${response.statusText}`);
+  }
+
+  return data;
+};
+
 interface ThreadEditorProps {
   project: Project;
   page: Page;
@@ -218,8 +236,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
         })
       });
 
-      const data = await response.json();
-      if (data.error) throw new Error(data.error);
+      const data = await readApiJson(response);
 
       await updateDoc(blockRef, {
         generatedCode: data.result,
