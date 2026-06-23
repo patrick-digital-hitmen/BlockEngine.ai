@@ -16,10 +16,10 @@ const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_
 // Helpers for WPBakery base64 encoded HTML
 const decodeWpCode = (code: string) => {
   if (!code) return code;
-  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, b64) => {
+  return code.replace(/\[vc_raw_html([^\]]*)\](.*?)\[\/vc_raw_html\]/gs, (match, attrs, b64) => {
     try {
       // WPBakery uses URL encoding THEN Base64 encoding for raw HTML
-      return `[vc_raw_html]${decodeURIComponent(Buffer.from(b64.trim(), "base64").toString())}[/vc_raw_html]`;
+      return `[vc_raw_html${attrs}]${decodeURIComponent(Buffer.from(b64.trim(), "base64").toString())}[/vc_raw_html]`;
     } catch {
       return match;
     }
@@ -28,14 +28,87 @@ const decodeWpCode = (code: string) => {
 
 const encodeWpCode = (code: string) => {
   if (!code) return code;
-  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, htmlContent) => {
+  return code.replace(/\[vc_raw_html([^\]]*)\](.*?)\[\/vc_raw_html\]/gs, (match, attrs, htmlContent) => {
     try {
-      return `[vc_raw_html]${Buffer.from(encodeURIComponent(htmlContent.trim())).toString("base64")}[/vc_raw_html]`;
+      return `[vc_raw_html${attrs}]${Buffer.from(encodeURIComponent(htmlContent.trim())).toString("base64")}[/vc_raw_html]`;
     } catch {
       return match;
     }
   });
 };
+
+const decodeGeneratedEntities = (text: string) => (
+  text
+    .replace(/&#60;/g, "<")
+    .replace(/&#62;/g, ">")
+    .replace(/&#34;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&apos;/g, "'")
+);
+
+const getVisibleText = (html: string) => (
+  html
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+);
+
+const isProtectedRawHtml = (html: string) => {
+  const normalized = html.toLowerCase();
+  const visibleText = getVisibleText(html);
+
+  return (
+    normalized.includes("arrow-down-group") ||
+    normalized.includes("award-slider") ||
+    normalized.includes("logoshowcase") ||
+    normalized.includes("brb_collection") ||
+    normalized.includes("contact-form-7") ||
+    (visibleText.length < 40 && !/<(h1|h2|h3|p|li)\b/i.test(html))
+  );
+};
+
+const protectRawHtml = (code: string) => {
+  const protectedBlocks: string[] = [];
+  const codeWithPlaceholders = code.replace(/\[vc_raw_html[^\]]*\]([\s\S]*?)\[\/vc_raw_html\]/g, (match, htmlContent) => {
+    if (!isProtectedRawHtml(htmlContent)) return match;
+
+    const placeholder = `__BLOCKENGINE_PROTECTED_RAW_HTML_${protectedBlocks.length}__`;
+    protectedBlocks.push(match);
+    return placeholder;
+  });
+
+  return { codeWithPlaceholders, protectedBlocks };
+};
+
+const restoreProtectedRawHtml = (code: string, protectedBlocks: string[]) => (
+  protectedBlocks.reduce(
+    (restored, block, index) => restored.replace(new RegExp(`__BLOCKENGINE_PROTECTED_RAW_HTML_${index}__`, "g"), block),
+    code
+  )
+);
+
+const protectAssetLiterals = (code: string) => {
+  const protectedAssets: string[] = [];
+  const codeWithAssetPlaceholders = code.replace(/https?:\/\/[^\s"'})\]]+/g, (url) => {
+    const placeholder = `__BLOCKENGINE_PROTECTED_ASSET_${protectedAssets.length}__`;
+    protectedAssets.push(url);
+    return placeholder;
+  });
+
+  return { codeWithAssetPlaceholders, protectedAssets };
+};
+
+const restoreAssetLiterals = (code: string, protectedAssets: string[]) => (
+  protectedAssets.reduce(
+    (restored, asset, index) => restored.replace(new RegExp(`__BLOCKENGINE_PROTECTED_ASSET_${index}__`, "g"), asset),
+    code
+  )
+);
 
 // AI Generation Route
 apiRouter.post("/generate", async (req, res) => {
@@ -43,6 +116,8 @@ apiRouter.post("/generate", async (req, res) => {
 
   const shouldRewrite = rewriteContent !== false; // Defaults to true
   const decodedBlockCode = decodeWpCode(blockCode);
+  const { codeWithPlaceholders, protectedBlocks } = protectRawHtml(decodedBlockCode);
+  const { codeWithAssetPlaceholders, protectedAssets } = protectAssetLiterals(codeWithPlaceholders);
 
   if (!blockCode || !writingInstructions || !builderType) {
     return res.status(400).json({ error: "Missing required fields" });
@@ -67,7 +142,8 @@ Non-negotiable preservation rules:
 4. For [vc_raw_html] blocks, the HTML has been decoded for you. Update visible copy inside the decoded HTML, preserve markup/classes/scripts/styles, and the server will re-encode it.
 5. Replace old-topic visible copy completely. Do not leave stale terms such as Company Registration, ASIC, shares or directors when the source is about Trust Establishment unless the source itself mentions them.
 6. Keep CTA text and anchors aligned with the source. If the source contains an anchor like #contact-us-section, keep the WPBakery button_link url:%23contact-us-section format.
-7. Return only final raw code. No markdown fences, commentary, notes, JSON or explanations.
+7. Preserve any __BLOCKENGINE_PROTECTED_*__ placeholders exactly. They represent protected images, URLs, scripts, forms, or decorative HTML that will be restored after generation.
+8. Return only final raw code. No markdown fences, commentary, notes, JSON or explanations.
 
 Content mapping rules:
 - Hero blocks: map H1, intro paragraph and first CTA.
@@ -91,7 +167,7 @@ SOURCE REPLACEMENT CONTENT (FACTS TO USE):
 ${replacementContent}
 
 TARGET CODE BLOCK TO REWRITE (STRUCTURAL TEMPLATE):
-${decodedBlockCode}
+${codeWithAssetPlaceholders}
 
 CONTEXT:
 - Builder: ${builderType}
@@ -140,7 +216,9 @@ ${globalButtonText ? `- Button Overwrite: "${globalButtonText}"` : ''}
       return cleaned.trim();
     };
 
-    const finalResult = encodeWpCode(cleanResult(result));
+    const restoredAssetsResult = restoreAssetLiterals(decodeGeneratedEntities(cleanResult(result)), protectedAssets);
+    const restoredResult = restoreProtectedRawHtml(restoredAssetsResult, protectedBlocks);
+    const finalResult = encodeWpCode(restoredResult);
     
     if (finalResult.includes("\uFFFD") || (finalResult.match(/[^\x20-\x7E\s]/g) && (finalResult.match(/[^\x20-\x7E\s]/g)!.length > finalResult.length * 0.2))) {
        throw new Error("GARBAGE_OUTPUT_DETECTED");
@@ -152,7 +230,7 @@ ${globalButtonText ? `- Button Overwrite: "${globalButtonText}"` : ''}
     try {
       const fallbackResponse = await (genAI as any).models.generateContent({
          model: "gemini-3.1-pro-preview",
-         contents: [{ role: "user", parts: [{ text: `SOURCE REPLACEMENT CONTENT:\n${replacementContent}\n\nTARGET CODE BLOCK:\n${blockCode}` }] }],
+         contents: [{ role: "user", parts: [{ text: `SOURCE REPLACEMENT CONTENT:\n${replacementContent}\n\nTARGET CODE BLOCK:\n${codeWithAssetPlaceholders}` }] }],
          config: {
             systemInstruction: `Rewrite the TARGET CODE BLOCK using only SOURCE REPLACEMENT CONTENT. Preserve every shortcode, structural wrapper, class, style, image, script, form shortcode and ID unless it is visible human copy. Replace stale topic copy completely. Return only raw code.`,
             temperature: 0.1
@@ -160,7 +238,9 @@ ${globalButtonText ? `- Button Overwrite: "${globalButtonText}"` : ''}
       });
       const fallbackResult = fallbackResponse.text || "";
       const cleanedFallback = fallbackResult.replace(/^```[a-z]*\n/gi, "").replace(/\n```$/g, "").trim();
-      res.json({ result: encodeWpCode(cleanedFallback) });
+      const restoredFallbackAssets = restoreAssetLiterals(decodeGeneratedEntities(cleanedFallback), protectedAssets);
+      const restoredFallback = restoreProtectedRawHtml(restoredFallbackAssets, protectedBlocks);
+      res.json({ result: encodeWpCode(restoredFallback) });
     } catch (fallbackError: any) {
       res.json({ result: blockCode });
     }

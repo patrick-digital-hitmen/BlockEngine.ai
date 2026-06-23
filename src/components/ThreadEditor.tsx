@@ -1,20 +1,20 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { db, handleFirestoreError, OperationType } from '../lib/firebase';
 import { collection, query, orderBy, onSnapshot, addDoc, doc, updateDoc, writeBatch, deleteDoc } from 'firebase/firestore';
 import { Project, Block, Page, PageBlock } from '../types';
 import { ArrowLeft, Play, Download, Loader2, Plus, GripVertical, CheckCircle2, Trash2, Wand2 } from 'lucide-react';
 import { motion, AnimatePresence, Reorder } from 'motion/react';
-import { mapBlocksToSourceSections } from '../lib/contentMapping';
+import { extractSourceSections, mapBlocksToSourceSections } from '../lib/contentMapping';
 
 const normalizeWpCodeForExport = (code: string) => {
   if (!code) return code;
-  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, content) => {
+  return code.replace(/\[vc_raw_html([^\]]*)\](.*?)\[\/vc_raw_html\]/gs, (match, attrs, content) => {
     const trimmed = content.trim();
     try {
       decodeURIComponent(atob(trimmed));
       return match;
     } catch {
-      return `[vc_raw_html]${btoa(encodeURIComponent(trimmed))}[/vc_raw_html]`;
+      return `[vc_raw_html${attrs}]${btoa(encodeURIComponent(trimmed))}[/vc_raw_html]`;
     }
   });
 };
@@ -36,6 +36,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
   const [disableRewrite, setDisableRewrite] = useState(false);
 
   const [globalButtonText, setGlobalButtonText] = useState(page.globalButtonText || '');
+  const sourceSections = useMemo(() => extractSourceSections(page.replacementContent || ''), [page.replacementContent]);
 
   const updateGlobalButtonText = async (val: string) => {
     setGlobalButtonText(val);
@@ -136,6 +137,17 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
     } catch (e) {
       console.error(e);
     }
+  };
+
+  const handleSelectSourceSection = async (blockId: string, sourceSectionId: string) => {
+    const selectedSection = sourceSections.find(section => section.id === sourceSectionId);
+    await handleUpdateMappedHtml(blockId, selectedSection?.html || '');
+  };
+
+  const getMappedSourceSectionId = (mappedHtmlSnippet?: string) => {
+    const normalizedSnippet = (mappedHtmlSnippet || '').trim();
+    if (!normalizedSnippet) return '';
+    return sourceSections.find(section => section.html.trim() === normalizedSnippet)?.id || 'custom';
   };
 
   const handleGenerate = async (pBlock: PageBlock) => {
@@ -440,8 +452,26 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                     
                     {(!block.isVerbatim) && (
                       <div className="px-5 py-3 bg-slate-50 border-b border-slate-100">
-                        <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-2">Mapped HTML Content</div>
-                        <textarea 
+                        <div className="flex items-center justify-between gap-3 mb-2">
+                          <div className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Mapped HTML Content</div>
+                          <select
+                            className="max-w-[320px] bg-white border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] font-semibold text-slate-600 outline-none focus:ring-2 focus:ring-indigo-500"
+                            value={getMappedSourceSectionId(block.mappedHtmlSnippet)}
+                            onChange={e => handleSelectSourceSection(block.id, e.target.value)}
+                          >
+                            <option value="">Unassigned</option>
+                            {getMappedSourceSectionId(block.mappedHtmlSnippet) === 'custom' && (
+                              <option value="custom" disabled>Custom / manual edit</option>
+                            )}
+                            {sourceSections.map((section, sectionIndex) => (
+                              <option key={section.id} value={section.id}>
+                                {section.title || `Source section ${sectionIndex + 1}`}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <textarea
+                          key={block.mappedHtmlSnippet || ''}
                           className="font-mono text-[10px] text-slate-600 w-full min-h-[80px] p-3 bg-white border border-slate-200 rounded resize-y focus:outline-none focus:ring-2 focus:ring-indigo-500"
                           defaultValue={block.mappedHtmlSnippet || ''}
                           onBlur={(e) => {

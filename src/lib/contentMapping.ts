@@ -22,6 +22,8 @@ const STOP_WORDS = new Set([
   'of', 'on', 'or', 'our', 'the', 'this', 'to', 'we', 'with', 'you', 'your'
 ]);
 
+const KIND_PRIORITY: SectionKind[] = ['hero', 'why', 'services', 'pricing', 'process', 'about', 'faq', 'contact', 'generic'];
+
 const decodeWpRawHtml = (code: string) => {
   if (!code) return code;
   return code.replace(/\[vc_raw_html(?:\s+[^\]]*)?\](.*?)\[\/vc_raw_html\]/gs, (match, b64) => {
@@ -50,6 +52,10 @@ const normalizeText = (value: string) => (
     .trim()
 );
 
+const hasShortcode = (code: string, shortcodeName: string) => (
+  new RegExp(`\\[${shortcodeName}\\b`, 'i').test(code)
+);
+
 const tokenize = (value: string) => (
   normalizeText(value)
     .split(' ')
@@ -73,16 +79,33 @@ const inferKind = (text: string, html = ''): SectionKind => {
   return 'generic';
 };
 
+const hasEditableStructure = (decodedBlock: string) => (
+  hasShortcode(decodedBlock, 'vc_custom_heading') ||
+  hasShortcode(decodedBlock, 'vc_column_text') ||
+  hasShortcode(decodedBlock, 'tek_button') ||
+  hasShortcode(decodedBlock, 'vc_tta_accordion') ||
+  hasShortcode(decodedBlock, 'vc_tta_section') ||
+  /<(h1|h2|h3|p|li)\b/i.test(decodedBlock)
+);
+
 const getTextFromHtml = (html: string) => {
   if (typeof DOMParser === 'undefined') return stripShortcodes(html.replace(/<[^>]*>/g, ' '));
   const doc = new DOMParser().parseFromString(`<body>${html}</body>`, 'text/html');
   return doc.body.textContent?.replace(/\s+/g, ' ').trim() || '';
 };
 
+const getSectionTitle = (nodes: Element[]) => {
+  const h1 = nodes.find(node => node.tagName.toLowerCase() === 'h1')?.textContent?.trim();
+  const h2 = nodes.find(node => node.tagName.toLowerCase() === 'h2')?.textContent?.trim();
+  const firstHeading = nodes.find(node => /^H[1-3]$/i.test(node.tagName))?.textContent?.trim();
+
+  if (h1 && h2) return `${h1} / ${h2}`;
+  return h2 || h1 || firstHeading || '';
+};
+
 const sectionFromNodes = (id: string, nodes: Element[]) => {
   const html = nodes.map(node => node.outerHTML).join('\n').trim();
-  const titleNode = nodes.find(node => /^H[1-3]$/i.test(node.tagName));
-  const title = titleNode?.textContent?.trim() || '';
+  const title = getSectionTitle(nodes);
   const text = nodes.map(node => node.textContent || '').join(' ').replace(/\s+/g, ' ').trim();
   return {
     id,
@@ -91,6 +114,32 @@ const sectionFromNodes = (id: string, nodes: Element[]) => {
     text,
     kind: inferKind(`${title} ${text}`, html)
   };
+};
+
+const isWrappedSection = (node: Element) => {
+  const tag = node.tagName.toLowerCase();
+  return ['article', 'main', 'section'].includes(tag) || (tag === 'div' && !!node.querySelector('h1,h2'));
+};
+
+const buildSectionsFromWrappedNodes = (nodes: Element[]) => {
+  const sections: SourceSection[] = [];
+  let sectionIndex = 0;
+
+  nodes.forEach(node => {
+    if (isWrappedSection(node)) {
+      sections.push(sectionFromNodes(`section-${sectionIndex++}`, [node]));
+    }
+  });
+
+  return sections.length > 1 ? sections : [];
+};
+
+const unwrapSinglePageContainer = (nodes: Element[]) => {
+  if (nodes.length !== 1 || !isWrappedSection(nodes[0])) return nodes;
+
+  const children = Array.from(nodes[0].children);
+  const directH2Count = children.filter(child => child.tagName.toLowerCase() === 'h2').length;
+  return directH2Count > 1 ? children : nodes;
 };
 
 export const extractSourceSections = (sourceHtml: string): SourceSection[] => {
@@ -102,7 +151,10 @@ export const extractSourceSections = (sourceHtml: string): SourceSection[] => {
 
   const doc = new DOMParser().parseFromString(sourceHtml, 'text/html');
   const body = doc.body;
-  const nodes = Array.from(body.children);
+  const nodes = unwrapSinglePageContainer(Array.from(body.children));
+  const wrappedSections = buildSectionsFromWrappedNodes(nodes);
+  if (wrappedSections.length > 0) return wrappedSections;
+
   const sections: SourceSection[] = [];
   let current: Element[] = [];
   let sectionIndex = 0;
@@ -115,7 +167,7 @@ export const extractSourceSections = (sourceHtml: string): SourceSection[] => {
 
   nodes.forEach(node => {
     const tag = node.tagName.toLowerCase();
-    if ((tag === 'h1' || tag === 'h2') && current.length > 0) {
+    if (tag === 'h2' && current.length > 0) {
       flush();
     }
     current.push(node);
@@ -136,10 +188,11 @@ const isDecorativeBlock = (blockCode: string) => {
   const decoded = decodeWpRawHtml(blockCode);
   const haystack = normalizeText(decoded);
   const hasNoMeaningfulText = getTextFromHtml(decoded).length < 80;
+  const hasEditableContent = hasEditableStructure(decoded);
 
   return (
-    haystack.includes('arrow down group') ||
-    haystack.includes('award slider') ||
+    (haystack.includes('arrow down group') && !hasEditableContent) ||
+    (haystack.includes('award slider') && !hasEditableContent) ||
     haystack.includes('logoshowcase') ||
     haystack.includes('brb collection') ||
     haystack.includes('contact form 7') ||
@@ -157,6 +210,12 @@ const inferBlockKind = (block: { name?: string; type?: string; originalCode?: st
   const visibleText = getTextFromHtml(stripShortcodes(decoded));
   return inferKind(`${explicit} ${headingText} ${visibleText}`, decoded);
 };
+
+const firstUnusedSectionByKind = (
+  sourceSections: SourceSection[],
+  kind: SectionKind,
+  usedSectionIds: Set<string>
+) => sourceSections.find(section => section.kind === kind && !usedSectionIds.has(section.id));
 
 const lexicalScore = (source: SourceSection, blockText: string) => {
   const sourceTokens = uniqueTokens(`${source.title} ${source.text}`);
@@ -182,6 +241,11 @@ export const selectBestSourceSection = (
   const decodedBlock = decodeWpRawHtml(block.originalCode || '');
   const blockText = `${block.name || ''} ${block.type || ''} ${getTextFromHtml(stripShortcodes(decodedBlock))}`;
   const blockKind = inferBlockKind(block);
+  const exactKindMatch = blockKind !== 'generic' ? firstUnusedSectionByKind(sourceSections, blockKind, usedSectionIds) : undefined;
+  if (exactKindMatch) {
+    usedSectionIds.add(exactKindMatch.id);
+    return exactKindMatch.html;
+  }
 
   let best: { section: SourceSection; score: number } | null = null;
 
@@ -210,5 +274,20 @@ export const mapBlocksToSourceSections = <T extends { name?: string; type?: stri
 ) => {
   const sourceSections = extractSourceSections(sourceHtml);
   const usedSectionIds = new Set<string>();
-  return blocks.map(block => selectBestSourceSection(block, sourceSections, usedSectionIds));
+  const mappedSnippets = blocks.map(() => '');
+  const blockKinds = blocks.map(block => block.isVerbatim || isDecorativeBlock(block.originalCode || '') ? 'generic' : inferBlockKind(block));
+
+  KIND_PRIORITY.forEach(kind => {
+    blocks.forEach((block, index) => {
+      if (mappedSnippets[index] || blockKinds[index] !== kind || kind === 'generic') return;
+      mappedSnippets[index] = selectBestSourceSection(block, sourceSections, usedSectionIds);
+    });
+  });
+
+  blocks.forEach((block, index) => {
+    if (mappedSnippets[index]) return;
+    mappedSnippets[index] = selectBestSourceSection(block, sourceSections, usedSectionIds);
+  });
+
+  return mappedSnippets;
 };

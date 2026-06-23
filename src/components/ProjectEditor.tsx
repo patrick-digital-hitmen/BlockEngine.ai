@@ -72,9 +72,9 @@ interface ProjectEditorProps {
 
 const decodeWpCode = (code: string) => {
   if (!code) return code;
-  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, b64) => {
+  return code.replace(/\[vc_raw_html([^\]]*)\](.*?)\[\/vc_raw_html\]/gs, (match, attrs, b64) => {
       try {
-          return `[vc_raw_html]${decodeURIComponent(atob(b64.trim()))}[/vc_raw_html]`;
+          return `[vc_raw_html${attrs}]${decodeURIComponent(atob(b64.trim()))}[/vc_raw_html]`;
       } catch {
           return match;
       }
@@ -83,13 +83,13 @@ const decodeWpCode = (code: string) => {
 
 const normalizeWpCodeForExport = (code: string) => {
   if (!code) return code;
-  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, content) => {
+  return code.replace(/\[vc_raw_html([^\]]*)\](.*?)\[\/vc_raw_html\]/gs, (match, attrs, content) => {
     const trimmed = content.trim();
     try {
       decodeURIComponent(atob(trimmed));
       return match;
     } catch {
-      return `[vc_raw_html]${btoa(encodeURIComponent(trimmed))}[/vc_raw_html]`;
+      return `[vc_raw_html${attrs}]${btoa(encodeURIComponent(trimmed))}[/vc_raw_html]`;
     }
   });
 };
