@@ -4,12 +4,19 @@ import { collection, query, orderBy, onSnapshot, addDoc, doc, updateDoc, writeBa
 import { Project, Block, Page, PageBlock } from '../types';
 import { ArrowLeft, Play, Download, Loader2, Plus, GripVertical, CheckCircle2, Trash2, Wand2 } from 'lucide-react';
 import { motion, AnimatePresence, Reorder } from 'motion/react';
+import { mapBlocksToSourceSections } from '../lib/contentMapping';
 
-const splitHtmlByH2 = (html: string) => {
-  if (!html) return [];
-  const marked = html.replace(/(<h2[\s>])/gi, '---H2_SPLIT---$1');
-  const parts = marked.split('---H2_SPLIT---');
-  return parts.filter(p => p.trim().length > 0);
+const normalizeWpCodeForExport = (code: string) => {
+  if (!code) return code;
+  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, content) => {
+    const trimmed = content.trim();
+    try {
+      decodeURIComponent(atob(trimmed));
+      return match;
+    } catch {
+      return `[vc_raw_html]${btoa(encodeURIComponent(trimmed))}[/vc_raw_html]`;
+    }
+  });
 };
 
 interface ThreadEditorProps {
@@ -72,7 +79,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
   const handleAutoMap = async () => {
     try {
       setIsGeneratingAll(true); // just use for loading state
-      const sections = splitHtmlByH2(page.replacementContent || '');
+      const mappedSnippets = mapBlocksToSourceSections(libraryBlocks, page.replacementContent || '');
       const batch = writeBatch(db);
       
       // Clear existing pageBlocks
@@ -80,23 +87,16 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
          batch.delete(doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, b.id));
       });
 
-      let sectionIndex = 0;
       libraryBlocks.forEach((libBlock, i) => {
          const newRef = doc(collection(db, `projects/${project.id}/pages/${page.id}/pageBlocks`));
-         
-         let mappedSnippet = '';
-         // Only map a section snippet if the block is NOT verbatim
-         if (!libBlock.isVerbatim && sectionIndex < sections.length) {
-            mappedSnippet = sections[sectionIndex];
-            sectionIndex++;
-         }
+         const mappedSnippet = mappedSnippets[i] || '';
 
          batch.set(newRef, {
           pageId: page.id,
           projectId: project.id,
           libraryBlockId: libBlock.id || null,
           originalCode: libBlock.originalCode || '',
-          mappedHtmlSnippet: mappedSnippet, 
+          mappedHtmlSnippet: mappedSnippet,
           generatedCode: '',
           status: 'pending',
           order: i,
@@ -148,13 +148,18 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
         return;
       }
 
+      if (!pBlock.mappedHtmlSnippet?.trim()) {
+        await updateDoc(blockRef, { generatedCode: pBlock.originalCode, status: 'completed' });
+        return;
+      }
+
       const response = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           blockCode: pBlock.originalCode,
           writingInstructions: project.writingInstructions,
-          replacementContent: pBlock.mappedHtmlSnippet || page.replacementContent || '', 
+          replacementContent: pBlock.mappedHtmlSnippet,
           builderType: project.builderType,
           mode: 'rewrite', // Defaults to rewrite in threads
           engine: engine,
@@ -207,20 +212,11 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
     }
   };
 
-  const encodeWpCode = (code: string) => {
-    if (!code) return code;
-    return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, htmlContent) => {
-        try {
-            return `[vc_raw_html]${btoa(encodeURIComponent(htmlContent.trim()))}[/vc_raw_html]`;
-        } catch {
-            return match;
-        }
-    });
-  };
-
   const handleDownload = () => {
-    let combined = pageBlocks.map(b => b.isVerbatim ? b.originalCode : (b.generatedCode || b.originalCode)).join('\n\n');
-    combined = encodeWpCode(combined);
+    const combined = pageBlocks.map(b => {
+      const code = b.isVerbatim ? b.originalCode : (b.generatedCode || b.originalCode);
+      return normalizeWpCodeForExport(code);
+    }).join('\n\n');
     const blob = new Blob([combined], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -262,8 +258,8 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
               }
             }}
           >
-            <option value="gemini">Gemini 1.5 Flash</option>
-            <option value="gemini-pro">Gemini 1.5 Pro</option>
+            <option value="gemini">Gemini Flash</option>
+            <option value="gemini-pro">Gemini Pro</option>
             <option value="groq">Groq</option>
           </select>
 

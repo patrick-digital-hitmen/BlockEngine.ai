@@ -69,7 +69,7 @@ export default function App() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-2 px-3 py-1 bg-emerald-50 text-emerald-700 rounded-full text-xs font-semibold border border-emerald-100">
             <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></span>
-            Groq Llama-3 Active
+            AI Rewrite Ready
           </div>
           <div className="flex items-center gap-2 pl-2 border-l border-slate-200">
             <img src={user.photoURL || ''} alt="" className="w-8 h-8 rounded-full border border-slate-300" />

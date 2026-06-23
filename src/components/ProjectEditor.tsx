@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { ThreadEditor } from './ThreadEditor';
+import { mapBlocksToSourceSections } from '../lib/contentMapping';
 
 function BlockNameInput({ db, projectId, block, index }: { db: any, projectId: string, block: Block, index: number }) {
   const [name, setName] = React.useState(block.name || `Section ${index + 1}`);
@@ -54,7 +55,7 @@ const extractBasicLayout = (code: string, builderType: string): string => {
       if (colsStr || extras.length > 0) {
         return [colsStr, ...extras].filter(Boolean).join(' • ');
       }
-    } else if (builderType === 'gutenberg') {
+    } else if (builderType === 'gutenberg-acf') {
       const coreColumns = [...code.matchAll(/<!-- wp:column\b/g)];
       if (coreColumns.length > 0) {
         return `${coreColumns.length} cols`;
@@ -80,11 +81,17 @@ const decodeWpCode = (code: string) => {
   });
 };
 
-const splitHtmlByH2 = (html: string) => {
-  if (!html) return [];
-  const marked = html.replace(/(<h2[\s>])/gi, '---H2_SPLIT---$1');
-  const parts = marked.split('---H2_SPLIT---');
-  return parts.filter(p => p.trim().length > 0);
+const normalizeWpCodeForExport = (code: string) => {
+  if (!code) return code;
+  return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, content) => {
+    const trimmed = content.trim();
+    try {
+      decodeURIComponent(atob(trimmed));
+      return match;
+    } catch {
+      return `[vc_raw_html]${btoa(encodeURIComponent(trimmed))}[/vc_raw_html]`;
+    }
+  });
 };
 
 export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
@@ -162,15 +169,12 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
          const template = pageTemplates.find(t => t.id === newPage.templateId);
          if (template && template.blocks) {
             const batch = writeBatch(db);
-            const sections = splitHtmlByH2(newPage.replacementContent);
+            const mappedSnippets = mapBlocksToSourceSections(template.blocks, newPage.replacementContent);
             
             template.blocks.forEach((tBlock: any, index: number) => {
                const pBlockRef = doc(collection(db, `projects/${project.id}/pages/${pageRef.id}/pageBlocks`));
                
-               let mappedSnippet = '';
-               if (index < sections.length && !tBlock.isVerbatim) {
-                  mappedSnippet = sections[index];
-               }
+               const mappedSnippet = mappedSnippets[index] || '';
 
                batch.set(pBlockRef, {
                  pageId: pageRef.id,
@@ -353,7 +357,7 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
       }
       return code.split(/(?=\[vc_row)/g).map(s => s.trim()).filter(Boolean);
     }
-    if (builderType === 'gutenberg') {
+    if (builderType === 'gutenberg-acf') {
       return code.split(/(?=<!-- wp:)/g).map(s => s.trim()).filter(Boolean);
     }
     if (builderType === 'elementor') {
@@ -407,7 +411,7 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
            return;
         }
 
-        const generationModel = model || (mode === 'seo' ? localStorage.getItem('seoModel') || 'gemini-1.5-pro' : localStorage.getItem('generateModel') || 'llama-3.1-8b-instant');
+        const generationModel = model || (mode === 'seo' ? localStorage.getItem('seoModel') || 'gemini-3.1-pro-preview' : localStorage.getItem('generateModel') || 'llama-3.1-8b-instant');
         const isGroqModel = engine === 'groq' || generationModel.startsWith('llama') || generationModel.startsWith('meta-llama') || generationModel.startsWith('mixtral') || generationModel.startsWith('gemma');
         
         const response = await fetch('/api/generate', {
@@ -461,20 +465,11 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
     setGenState(prev => ({ ...prev, isGenerating: false }));
   };
 
-  const encodeWpCode = (code: string) => {
-    if (!code) return code;
-    return code.replace(/\[vc_raw_html\](.*?)\[\/vc_raw_html\]/gs, (match, htmlContent) => {
-        try {
-            return `[vc_raw_html]${btoa(encodeURIComponent(htmlContent.trim()))}[/vc_raw_html]`;
-        } catch {
-            return match;
-        }
-    });
-  };
-
   const handleDownload = () => {
-    let combined = blocks.map(b => previewMode === 'original' || b.isVerbatim ? b.originalCode : (previewMode === 'seo' ? b.seoContent || b.originalCode : b.content || b.originalCode)).join('\n\n');
-    combined = encodeWpCode(combined);
+    const combined = blocks.map(b => {
+      const code = previewMode === 'original' || b.isVerbatim ? b.originalCode : (previewMode === 'seo' ? b.seoContent || b.originalCode : b.content || b.originalCode);
+      return normalizeWpCodeForExport(code);
+    }).join('\n\n');
     const blob = new Blob([combined], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -921,8 +916,8 @@ export function ProjectEditor({ project, onBack }: ProjectEditorProps) {
                             }
                           }}
                         >
-                          <option value="gemini">Gemini 1.5 Flash</option>
-                          <option value="gemini-pro">Gemini 1.5 Pro</option>
+                          <option value="gemini">Gemini Flash</option>
+                          <option value="gemini-pro">Gemini Pro</option>
                           <option value="groq">Groq</option>
                         </select>
                         {engine === 'groq' && (

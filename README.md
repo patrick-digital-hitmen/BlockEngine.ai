@@ -1,20 +1,69 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# BlockEngine.ai
 
-# Run and deploy your AI Studio app
+BlockEngine.ai is a React + Firebase app for rewriting and repurposing WordPress page-builder sections with AI while preserving the original builder structure.
 
-This contains everything you need to run your app locally.
+It is designed for content migration workflows where a source page or content brief needs to be mapped into reusable Elementor, WPBakery, or Gutenberg/ACF blocks.
 
-View your app in AI Studio: https://ai.studio/apps/808d76fd-3675-482f-83d9-d3b89b742713
+## Features
 
-## Run Locally
+- Google sign-in with Firebase Auth
+- Project-based component libraries
+- Page threads that map source HTML/content into saved builder sections
+- AI generation through Gemini or Groq-backed Llama models
+- WPBakery raw HTML decode/re-encode support on generation
+- Firestore security rules scoped by project ownership
 
-**Prerequisites:**  Node.js
+## Prerequisites
 
+- Node.js 20+
+- A Firebase project with Google Auth and Firestore enabled
+- A Gemini API key
+- Optional: a Groq API key for Llama models
+
+## Local Setup
 
 1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+
+   ```bash
+   npm install
+   ```
+
+2. Create `.env.local` from the example:
+
+   ```bash
+   cp .env.example .env.local
+   ```
+
+3. Set your local secrets:
+
+   ```bash
+   GEMINI_API_KEY="your-gemini-api-key"
+   GROQ_API_KEY="your-groq-api-key"
+   ```
+
+4. Confirm `firebase-applet-config.json` points at the Firebase project and Firestore database you want to use.
+
+5. Start the app:
+
+   ```bash
+   npm run dev
+   ```
+
+The local server runs at `http://localhost:3000`.
+
+## Scripts
+
+- `npm run dev` starts the Express + Vite development server.
+- `npm run build` builds the Vite client and bundles the Node server.
+- `npm start` runs the built server from `dist/server.cjs`.
+- `npm run lint` runs TypeScript with `--noEmit`.
+
+## Deployment Notes
+
+The repo includes `vercel.json` and `api/index.ts` for Vercel-style API routing. Configure these environment variables in production:
+
+- `GEMINI_API_KEY`
+- `GROQ_API_KEY` if Groq models are enabled
+- `APP_URL` for the deployed app URL
+
+Review and deploy `firestore.rules` before allowing real user data.

@@ -8,7 +8,7 @@ apiRouter.use(express.json());
 
 const genAI = new GoogleGenAI({
   apiKey: process.env.GEMINI_API_KEY || "",
-  httpOptions: { headers: { "User-Agent": "aistudio-build" } }
+  httpOptions: { headers: { "User-Agent": "blockengine-ai" } }
 });
 
 const groq = process.env.GROQ_API_KEY ? new Groq({ apiKey: process.env.GROQ_API_KEY }) : null;
@@ -49,26 +49,38 @@ apiRouter.post("/generate", async (req, res) => {
   }
 
   let resolvedEngine = engine;
-  const activeModel = model || "gemini-3.5-flash";
+  const activeModel = model || (engine === "gemini-pro" ? "gemini-3.1-pro-preview" : "gemini-3.5-flash");
   if (activeModel.startsWith("llama") || activeModel.startsWith("meta-llama") || activeModel.startsWith("mixtral") || activeModel.startsWith("gemma")) {
     resolvedEngine = "groq";
   }
 
   try {
     let systemInstruction = `You are an expert Content Migration Specialist and WordPress Architect.
-Your absolute priority is to REWRITE the provided TARGET CODE BLOCK using ONLY the facts from the SOURCE REPLACEMENT CONTENT.
+Your job is to rewrite the TARGET CODE BLOCK using the SOURCE REPLACEMENT CONTENT as the only factual source.
 
-CRITICAL TOPIC REPLACEMENT RULE:
-- The TARGET CODE BLOCK is just a structural template. You MUST REPLACE ALL text, numbers, and lists from the old topic with the new facts from the SOURCE REPLACEMENT CONTENT. 
-- Example: If the block is about "Company Registration" and the new content is about "Trust Establishment", you MUST remove "Company Registration" entirely and use "Trust Establishment" everywhere it is appropriate.
+The TARGET CODE BLOCK is a structural template. The SOURCE REPLACEMENT CONTENT is the mapped content slice for this exact template block, not a suggestion.
 
-Rules for Content integration:
-1. STRICTLY PRESERVE the code architecture. Do NOT modify shortcodes (vc_row, vc_column, etc.), JSON keys, CSS classes, or technical attributes.
-2. MAP the "Source Replacement Content" to the existing structural fields. Replace all old human-readable text.
-3. ${shouldRewrite ? 'REWRITE the facts from the source content to fit the length and style of the target block. Feel free to rephrase.' : 'Inject the Source Replacement Content exactly as it reads.'}
-4. HTML FORMATTING: If generating list items, wrap short descriptors in <strong> tags (e.g., <li><strong>Descriptor</strong> Elaborating sentence</li>).
-5. ENCODED RAW HTML: If you encounter a [vc_raw_html] shortcode, the content is already decoded for you in the prompt. Update the readable text within it while preserving structure, then the system will re-encode it.
-6. Return ONLY the final raw code. No markdown boxes, no talk.`;
+Non-negotiable preservation rules:
+1. Preserve every shortcode tag, shortcode nesting level, attribute name, CSS class, ID, image ID, column width, animation, inline style, script, link target format and raw structural wrapper unless the attribute is visibly human copy.
+2. Preserve WPBakery syntax exactly. Never convert shortcodes into plain HTML.
+3. Preserve the number and order of structural repeated items in the target block. If the source has more items than the template, use the best-fitting first items. If the source has fewer items, reuse only source facts and leave extra structure concise rather than inventing.
+4. For [vc_raw_html] blocks, the HTML has been decoded for you. Update visible copy inside the decoded HTML, preserve markup/classes/scripts/styles, and the server will re-encode it.
+5. Replace old-topic visible copy completely. Do not leave stale terms such as Company Registration, ASIC, shares or directors when the source is about Trust Establishment unless the source itself mentions them.
+6. Keep CTA text and anchors aligned with the source. If the source contains an anchor like #contact-us-section, keep the WPBakery button_link url:%23contact-us-section format.
+7. Return only final raw code. No markdown fences, commentary, notes, JSON or explanations.
+
+Content mapping rules:
+- Hero blocks: map H1, intro paragraph and first CTA.
+- Why/benefits blocks: map the source list items in order and preserve <strong> descriptor formatting.
+- Service grids/cards: map source H3 service headings and their following paragraphs to existing cards in order.
+- Pricing blocks: map the heading, price and inclusions exactly from the source pricing section.
+- Process blocks: map ordered-list steps in order.
+- About blocks: map the About section paragraphs.
+- FAQ accordion blocks: map each source H3 question to an accordion title and the following paragraph to its answer.
+- Contact blocks: map only the booking/contact heading and preserve the form shortcode.
+
+Writing mode:
+${shouldRewrite ? '- Rewrite source facts to fit the target block length and tone while preserving meaning.' : '- Inject source wording as directly as possible while preserving valid target syntax.'}`;
 
     if (resolvedEngine === 'groq') {
        systemInstruction += `\n\nCRITICAL: DO NOT output binary characters or mojibake.`;
@@ -101,8 +113,12 @@ ${globalButtonText ? `- Button Overwrite: "${globalButtonText}"` : ''}
       });
       result = completion.choices[0]?.message?.content || "";
     } else {
-      // Default to Gemini 3.x models
-      const geminiModel = activeModel === "gemini-1.5-pro" || activeModel === "gemini-3.1-pro-preview" ? "gemini-3.1-pro-preview" : "gemini-3.5-flash";
+      // Keep old saved settings working while defaulting to the current Gemini model family.
+      const geminiModel = activeModel === "gemini-1.5-pro"
+        ? "gemini-3.1-pro-preview"
+        : activeModel === "gemini-1.5-flash"
+          ? "gemini-3.5-flash"
+          : activeModel;
       
       const response = await (genAI as any).models.generateContent({
         model: geminiModel,
@@ -138,7 +154,7 @@ ${globalButtonText ? `- Button Overwrite: "${globalButtonText}"` : ''}
          model: "gemini-3.1-pro-preview",
          contents: [{ role: "user", parts: [{ text: `SOURCE REPLACEMENT CONTENT:\n${replacementContent}\n\nTARGET CODE BLOCK:\n${blockCode}` }] }],
          config: {
-            systemInstruction: `You are an expert Content Migration Specialist. Rewrite the TARGET CODE BLOCK content using the facts from SOURCE REPLACEMENT CONTENT. Preserve ALL structural code/shortcodes. RETURN ONLY RAW CODE.`,
+            systemInstruction: `Rewrite the TARGET CODE BLOCK using only SOURCE REPLACEMENT CONTENT. Preserve every shortcode, structural wrapper, class, style, image, script, form shortcode and ID unless it is visible human copy. Replace stale topic copy completely. Return only raw code.`,
             temperature: 0.1
          }
       });
@@ -176,7 +192,11 @@ Code:
 ${decodedBlockCode.substring(0, 3500)}`;
 
   const classifyWithGemini = async (mdl: string) => {
-    const geminiMdl = mdl === "gemini-1.5-flash" ? "gemini-3.5-flash" : mdl;
+    const geminiMdl = mdl === "gemini-1.5-flash"
+      ? "gemini-3.5-flash"
+      : mdl === "gemini-1.5-pro"
+        ? "gemini-3.1-pro-preview"
+        : mdl;
     const resp = await (genAI as any).models.generateContent({
       model: geminiMdl,
       contents: [{ role: "user", parts: [{ text: systemInstruction }] }],
@@ -205,11 +225,11 @@ ${decodedBlockCode.substring(0, 3500)}`;
       if (isGroqModel) {
         data = await classifyWithGroq(model || "llama-3.1-8b-instant");
       } else {
-        data = await classifyWithGemini(model || "gemini-1.5-flash");
+        data = await classifyWithGemini(model || "gemini-3.5-flash");
       }
     } catch (primaryError) {
-      console.error("Primary classification failed, falling back to gemini-1.5-flash...", primaryError);
-      data = await classifyWithGemini("gemini-1.5-flash");
+      console.error("Primary classification failed, falling back to gemini-3.5-flash...", primaryError);
+      data = await classifyWithGemini("gemini-3.5-flash");
     }
     
     res.json({ 

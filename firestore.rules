@@ -11,27 +11,141 @@ service cloud.firestore {
              get(/databases/$(database)/documents/projects/$(projectId)).data.ownerId == request.auth.uid;
     }
 
+    function isValidBuilderType(value) {
+      return value in ['wp-bakery', 'elementor', 'gutenberg-acf'];
+    }
+
+    function hasOnlyProjectFields() {
+      return request.resource.data.keys().hasOnly([
+        'name',
+        'writingInstructions',
+        'builderType',
+        'createdAt',
+        'ownerId',
+        'replacementContent'
+      ]);
+    }
+
+    function hasRequiredProjectFields() {
+      return request.resource.data.keys().hasAll([
+        'name',
+        'writingInstructions',
+        'builderType',
+        'createdAt',
+        'ownerId'
+      ]);
+    }
+
+    function isValidProjectCreate() {
+      return hasOnlyProjectFields() &&
+             hasRequiredProjectFields() &&
+             request.resource.data.ownerId == request.auth.uid &&
+             request.resource.data.name is string &&
+             request.resource.data.writingInstructions is string &&
+             isValidBuilderType(request.resource.data.builderType);
+    }
+
+    function isValidProjectUpdate() {
+      return hasOnlyProjectFields() &&
+             request.resource.data.ownerId == resource.data.ownerId &&
+             request.resource.data.ownerId == request.auth.uid &&
+             request.resource.data.name is string &&
+             request.resource.data.writingInstructions is string &&
+             isValidBuilderType(request.resource.data.builderType);
+    }
+
+    function isValidBlock(projectId) {
+      return request.resource.data.keys().hasOnly([
+        'name',
+        'originalCode',
+        'content',
+        'seoContent',
+        'order',
+        'type',
+        'projectId',
+        'isVerbatim',
+        'layoutDescription',
+        'textPreview',
+        'cleanHtml'
+      ]) &&
+      request.resource.data.projectId == projectId &&
+      request.resource.data.name is string &&
+      request.resource.data.originalCode is string &&
+      request.resource.data.order is int &&
+      request.resource.data.type is string;
+    }
+
+    function isValidPage(projectId) {
+      return request.resource.data.keys().hasOnly([
+        'projectId',
+        'title',
+        'replacementContent',
+        'globalButtonText',
+        'createdAt'
+      ]) &&
+      request.resource.data.projectId == projectId &&
+      request.resource.data.title is string;
+    }
+
+    function isValidPageBlock(projectId, pageId) {
+      return request.resource.data.keys().hasOnly([
+        'pageId',
+        'projectId',
+        'libraryBlockId',
+        'originalCode',
+        'mappedHtmlSnippet',
+        'generatedCode',
+        'status',
+        'order',
+        'isVerbatim',
+        'name',
+        'type'
+      ]) &&
+      request.resource.data.projectId == projectId &&
+      request.resource.data.pageId == pageId &&
+      request.resource.data.originalCode is string &&
+      request.resource.data.status in ['pending', 'generating', 'completed', 'failed'] &&
+      request.resource.data.order is int &&
+      request.resource.data.name is string &&
+      request.resource.data.type is string;
+    }
+
+    function isValidTemplate(projectId) {
+      return request.resource.data.keys().hasOnly([
+        'projectId',
+        'name',
+        'blocks'
+      ]) &&
+      request.resource.data.projectId == projectId &&
+      request.resource.data.name is string &&
+      request.resource.data.blocks is list;
+    }
+
     // Projects collection
     match /projects/{projectId} {
       allow read, delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
-      allow create: if isSignedIn() && request.resource.data.ownerId == request.auth.uid;
-      allow update: if isSignedIn() && resource.data.ownerId == request.auth.uid && request.resource.data.ownerId == request.auth.uid;
+      allow create: if isSignedIn() && isValidProjectCreate();
+      allow update: if isSignedIn() && resource.data.ownerId == request.auth.uid && isValidProjectUpdate();
 
       // Subcollections
       match /blocks/{blockId} {
-        allow read, write: if isProjectOwner(projectId);
+        allow read, delete: if isProjectOwner(projectId);
+        allow create, update: if isProjectOwner(projectId) && isValidBlock(projectId);
       }
 
       match /pages/{pageId} {
-        allow read, write: if isProjectOwner(projectId);
+        allow read, delete: if isProjectOwner(projectId);
+        allow create, update: if isProjectOwner(projectId) && isValidPage(projectId);
 
         match /pageBlocks/{pageBlockId} {
-          allow read, write: if isProjectOwner(projectId);
+          allow read, delete: if isProjectOwner(projectId);
+          allow create, update: if isProjectOwner(projectId) && isValidPageBlock(projectId, pageId);
         }
       }
 
       match /templates/{templateId} {
-        allow read, write: if isProjectOwner(projectId);
+        allow read, delete: if isProjectOwner(projectId);
+        allow create, update: if isProjectOwner(projectId) && isValidTemplate(projectId);
       }
     }
 
