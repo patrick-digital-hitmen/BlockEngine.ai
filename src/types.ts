@@ -42,6 +42,7 @@ export interface PageBlock {
   originalCode: string;
   mappedHtmlSnippet: string;
   generatedCode: string;
+  generatedInputHash?: string;
   status: 'pending' | 'generating' | 'completed' | 'failed';
   order: number;
   isVerbatim: boolean;

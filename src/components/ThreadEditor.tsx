@@ -19,6 +19,14 @@ const normalizeWpCodeForExport = (code: string) => {
   });
 };
 
+const stableHash = (value: string) => {
+  let hash = 5381;
+  for (let i = 0; i < value.length; i++) {
+    hash = ((hash << 5) + hash) ^ value.charCodeAt(i);
+  }
+  return (hash >>> 0).toString(36);
+};
+
 interface ThreadEditorProps {
   project: Project;
   page: Page;
@@ -43,6 +51,18 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
     await updateDoc(doc(db, `projects/${project.id}/pages`, page.id), { globalButtonText: val });
   };
 
+  const getGenerationInputHash = (block: PageBlock) => stableHash(JSON.stringify({
+    originalCode: block.originalCode || '',
+    mappedHtmlSnippet: block.mappedHtmlSnippet || '',
+    writingInstructions: project.writingInstructions || '',
+    globalButtonText: globalButtonText || '',
+    rewriteContent: !disableRewrite
+  }));
+
+  const isGeneratedCurrent = (block: PageBlock) => (
+    !!block.generatedCode && block.generatedInputHash === getGenerationInputHash(block)
+  );
+
   useEffect(() => {
     const q = query(collection(db, `projects/${project.id}/pages/${page.id}/pageBlocks`), orderBy('order', 'asc'));
     const unsubscribe = onSnapshot(q, (snapshot) => {
@@ -65,6 +85,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
         mappedHtmlSnippet: '', // the specific part of replacementContent to use... or the whole thing? For now we pass the thread html
         generatedCode: '',
         status: 'pending',
+        generatedInputHash: '',
         order: pageBlocks.length,
         isVerbatim: libBlock.isVerbatim || false,
         name: libBlock.name,
@@ -99,6 +120,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
           originalCode: libBlock.originalCode || '',
           mappedHtmlSnippet: mappedSnippet,
           generatedCode: '',
+          generatedInputHash: '',
           status: 'pending',
           order: i,
           isVerbatim: libBlock.isVerbatim || false,
@@ -126,14 +148,20 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
       name: libBlock.name,
       type: libBlock.type,
       status: 'pending',
-      generatedCode: ''
+      generatedCode: '',
+      generatedInputHash: ''
     });
   };
 
   const handleUpdateMappedHtml = async (blockId: string, newValue: string) => {
     try {
       const blockRef = doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, blockId);
-      await updateDoc(blockRef, { mappedHtmlSnippet: newValue });
+      await updateDoc(blockRef, {
+        mappedHtmlSnippet: newValue,
+        generatedCode: '',
+        generatedInputHash: '',
+        status: newValue.trim() ? 'pending' : 'completed'
+      });
     } catch (e) {
       console.error(e);
     }
@@ -153,15 +181,24 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
   const handleGenerate = async (pBlock: PageBlock) => {
     try {
       const blockRef = doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, pBlock.id);
+      const generationInputHash = getGenerationInputHash(pBlock);
       await updateDoc(blockRef, { status: 'generating' });
 
       if (pBlock.isVerbatim) {
-        await updateDoc(blockRef, { generatedCode: pBlock.originalCode, status: 'completed' });
+        await updateDoc(blockRef, {
+          generatedCode: pBlock.originalCode,
+          generatedInputHash: generationInputHash,
+          status: 'completed'
+        });
         return;
       }
 
       if (!pBlock.mappedHtmlSnippet?.trim()) {
-        await updateDoc(blockRef, { generatedCode: pBlock.originalCode, status: 'completed' });
+        await updateDoc(blockRef, {
+          generatedCode: pBlock.originalCode,
+          generatedInputHash: generationInputHash,
+          status: 'completed'
+        });
         return;
       }
 
@@ -184,7 +221,11 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
       const data = await response.json();
       if (data.error) throw new Error(data.error);
 
-      await updateDoc(blockRef, { generatedCode: data.result, status: 'completed' });
+      await updateDoc(blockRef, {
+        generatedCode: data.result,
+        generatedInputHash: generationInputHash,
+        status: 'completed'
+      });
     } catch (error: any) {
       console.error("Generation failed:", error);
       const blockRef = doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, pBlock.id);
@@ -200,7 +241,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
         await handleGenerate(block);
         continue;
       }
-      if (block.status === 'completed') continue; 
+      if (block.status === 'completed' && isGeneratedCurrent(block)) continue;
       
       await handleGenerate(block);
       // Small delay for rate limits
@@ -225,6 +266,17 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
   };
 
   const handleDownload = () => {
+    const staleBlocks = pageBlocks.filter(block => (
+      !block.isVerbatim &&
+      !!block.mappedHtmlSnippet?.trim() &&
+      !isGeneratedCurrent(block)
+    ));
+
+    if (staleBlocks.length > 0) {
+      alert(`${staleBlocks.length} mapped section${staleBlocks.length === 1 ? ' has' : 's have'} stale or missing generated output. Run Generate All Content before exporting.`);
+      return;
+    }
+
     const combined = pageBlocks.map(b => {
       const code = b.isVerbatim ? b.originalCode : (b.generatedCode || b.originalCode);
       return normalizeWpCodeForExport(code);
@@ -397,6 +449,12 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                     exit={{ opacity: 0, scale: 0.95 }}
                     className="bg-white rounded-2xl border border-slate-200 shadow-sleek overflow-hidden group"
                   >
+                    {(() => {
+                      const generatedCurrent = isGeneratedCurrent(block);
+                      const isStale = !block.isVerbatim && !!block.mappedHtmlSnippet?.trim() && !!block.generatedCode && !generatedCurrent;
+
+                      return (
+                    <>
                     <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between bg-slate-50/30">
                       <div className="flex items-center gap-4">
                         <div className="cursor-grab active:cursor-grabbing text-slate-300 hover:text-slate-400 p-1">
@@ -422,7 +480,8 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                             <span className="text-[9px] font-bold text-indigo-400 uppercase tracking-[0.2em]">{block.type || 'Unmapped'}</span>
                             {block.isVerbatim && <span className="text-[9px] font-bold text-emerald-500 bg-emerald-50 px-1 rounded uppercase tracking-[0.1em]">Verbatim</span>}
                             {block.mappedHtmlSnippet && <span className="text-[9px] font-bold text-amber-500 bg-amber-50 px-1 rounded uppercase tracking-[0.1em]">Mapped</span>}
-                            {block.status === 'completed' && <span className="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-1 rounded uppercase tracking-[0.1em]">Generated</span>}
+                            {isStale && <span className="text-[9px] font-bold text-red-500 bg-red-50 px-1 rounded uppercase tracking-[0.1em]">Stale</span>}
+                            {block.status === 'completed' && generatedCurrent && <span className="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-1 rounded uppercase tracking-[0.1em]">Generated</span>}
                           </div>
                         </div>
                       </div>
@@ -430,8 +489,19 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                       <div className="flex items-center gap-2">
                         <label className="flex items-center gap-1.5 cursor-pointer group">
                            <input type="checkbox" checked={block.isVerbatim || false} onChange={async (e) => {
-                             const updates: any = { isVerbatim: e.target.checked };
-                             if (e.target.checked) updates.generatedCode = block.originalCode;
+                             const updates: any = e.target.checked
+                               ? {
+                                   isVerbatim: true,
+                                   generatedCode: block.originalCode,
+                                   generatedInputHash: getGenerationInputHash(block),
+                                   status: 'completed'
+                                 }
+                               : {
+                                   isVerbatim: false,
+                                   generatedCode: '',
+                                   generatedInputHash: '',
+                                   status: block.mappedHtmlSnippet?.trim() ? 'pending' : 'completed'
+                                 };
                              await updateDoc(doc(db, `projects/${project.id}/pages/${page.id}/pageBlocks`, block.id), updates);
                            }} className="w-3.5 h-3.5 rounded text-emerald-500 focus:ring-emerald-500 border-slate-300" />
                            <span className="text-[10px] font-bold text-slate-500 group-hover:text-emerald-600 transition-colors uppercase tracking-wider">Verbatim</span>
@@ -442,7 +512,7 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                           className="bg-slate-100 hover:bg-indigo-50 text-indigo-600 font-bold text-xs py-1.5 px-3 rounded-lg flex items-center gap-1.5 transition-all disabled:opacity-50 ml-2"
                         >
                           {block.status === 'generating' ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5" />}
-                          {block.status === 'completed' && !block.isVerbatim ? 'Regenerate' : 'Generate'}
+                          {(block.status === 'completed' || isStale) && !block.isVerbatim ? 'Regenerate' : 'Generate'}
                         </button>
                         <button onClick={() => handleRemove(block.id)} className="p-1.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-lg">
                            <Trash2 className="w-4 h-4" />
@@ -486,10 +556,15 @@ export function ThreadEditor({ project, page, libraryBlocks, onBack }: ThreadEdi
                     
                     {block.status === 'completed' && block.generatedCode && (
                        <div className="p-4 bg-indigo-50/30 border-t border-indigo-50 font-mono text-[10px] text-slate-700 whitespace-pre-wrap max-h-48 overflow-y-auto relative">
-                         <div className="absolute top-2 right-2 text-[9px] font-bold text-indigo-400 uppercase tracking-widest bg-white px-2 py-1 rounded shadow-sm">Generated HTML</div>
+                         <div className={`absolute top-2 right-2 text-[9px] font-bold uppercase tracking-widest bg-white px-2 py-1 rounded shadow-sm ${isStale ? 'text-red-400' : 'text-indigo-400'}`}>
+                           {isStale ? 'Stale HTML' : 'Generated HTML'}
+                         </div>
                          {block.generatedCode}
                        </div>
                     )}
+                    </>
+                      );
+                    })()}
                   </Reorder.Item>
                 ))}
               </AnimatePresence>
