@@ -1,6 +1,7 @@
 import express from "express";
 import { GoogleGenAI } from "@google/genai";
 import Groq from "groq-sdk";
+import { tryPatchWpBakeryWithSchema } from "./wpBakerySchemaPatcher";
 
 export const apiRouter = express.Router();
 
@@ -116,6 +117,14 @@ apiRouter.post("/generate", async (req, res) => {
 
   const shouldRewrite = rewriteContent !== false; // Defaults to true
   const decodedBlockCode = decodeWpCode(blockCode);
+
+  if (builderType === "wp-bakery" && replacementContent?.trim()) {
+    const schemaPatched = tryPatchWpBakeryWithSchema(decodedBlockCode, replacementContent, { globalButtonText });
+    if (schemaPatched) {
+      return res.json({ result: encodeWpCode(schemaPatched) });
+    }
+  }
+
   const { codeWithPlaceholders, protectedBlocks } = protectRawHtml(decodedBlockCode);
   const { codeWithAssetPlaceholders, protectedAssets } = protectAssetLiterals(codeWithPlaceholders);
 
